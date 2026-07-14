@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#2a3270"/>
+      <stop offset="55%" stop-color="#171a44"/>
+      <stop offset="100%" stop-color="#0b0d24"/>
+    </linearGradient>
+    <radialGradient id="halo" cx="50%" cy="46%" r="55%">
+      <stop offset="0%" stop-color="#8b9bff" stop-opacity="0.55"/>
+      <stop offset="55%" stop-color="#6b5cff" stop-opacity="0.12"/>
+      <stop offset="100%" stop-color="#6b5cff" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="orb" cx="42%" cy="38%" r="62%">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="30%" stop-color="#c7ccff"/>
+      <stop offset="58%" stop-color="#8a86ff"/>
+      <stop offset="82%" stop-color="#5b3fae"/>
+      <stop offset="100%" stop-color="#2c1c63"/>
+    </radialGradient>
+    <radialGradient id="gloss" cx="40%" cy="32%" r="40%">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.9"/>
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="soft" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="6"/>
+    </filter>
+  </defs>
+
+  <!-- 背景 -->
+  <rect width="512" height="512" fill="url(#bg)"/>
+  <rect width="512" height="512" fill="url(#halo)"/>
+
+  <!-- 声纳环（语音信号）-->
+  <g fill="none" stroke="#9fb0ff" stroke-linecap="round">
+    <circle cx="256" cy="244" r="120" stroke-opacity="0.28" stroke-width="3"/>
+    <circle cx="256" cy="244" r="158" stroke-opacity="0.16" stroke-width="3"/>
+    <circle cx="256" cy="244" r="196" stroke-opacity="0.08" stroke-width="3"/>
+  </g>
+
+  <!-- 发光球体 -->
+  <circle cx="256" cy="244" r="92" fill="#8a86ff" opacity="0.55" filter="url(#soft)"/>
+  <circle cx="256" cy="244" r="84" fill="url(#orb)"/>
+  <ellipse cx="234" cy="214" rx="42" ry="32" fill="url(#gloss)"/>
+
+  <!-- 底部声波三短杠（播报感）-->
+  <g fill="#cdd5ff" opacity="0.92">
+    <rect x="226" y="372" width="10" height="22" rx="5"/>
+    <rect x="244" y="362" width="10" height="42" rx="5"/>
+    <rect x="262" y="368" width="10" height="30" rx="5"/>
+    <rect x="280" y="358" width="10" height="50" rx="5"/>
+  </g>
+</svg>

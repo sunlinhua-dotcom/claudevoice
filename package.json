@@ -1,0 +1,13 @@
+{
+  "name": "claudevoice",
+  "version": "1.0.0",
+  "description": "Claude Code 全局语音通知台 —— 任务完成/等待输入时，网页自动按项目配色并用小米 MiMo TTS 语音播报。",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "setup": "node setup.js",
+    "uninstall-hooks": "node setup.js --remove"
+  },
+  "engines": { "node": ">=14" },
+  "license": "MIT"
+}

@@ -1,0 +1,63 @@
+<!doctype html><meta charset="utf-8"><body><pre id="s">rendering…</pre>
+<script>
+function bufToWav(buf){
+  const ch=buf.numberOfChannels, sr=buf.sampleRate, n=buf.length, bps=2, ba=ch*bps;
+  const dv=new DataView(new ArrayBuffer(44+n*ba)); let p=0;
+  const s=t=>{for(let i=0;i<t.length;i++)dv.setUint8(p++,t.charCodeAt(i));};
+  const u32=v=>{dv.setUint32(p,v,true);p+=4;}, u16=v=>{dv.setUint16(p,v,true);p+=2;};
+  s('RIFF');u32(36+n*ba);s('WAVE');s('fmt ');u32(16);u16(1);u16(ch);u32(sr);u32(sr*ba);u16(ba);u16(16);s('data');u32(n*ba);
+  const cd=[];for(let c=0;c<ch;c++)cd.push(buf.getChannelData(c));
+  for(let i=0;i<n;i++)for(let c=0;c<ch;c++){let v=Math.max(-1,Math.min(1,cd[c][i]));dv.setInt16(p,v<0?v*32768:v*32767,true);p+=2;}
+  let bin='';const u8=new Uint8Array(dv.buffer);for(let i=0;i<u8.length;i++)bin+=String.fromCharCode(u8[i]);return btoa(bin);
+}
+async function renderCue(kind){
+  const sr=44100, needs=(kind!=='done'), dur=needs?4.2:3.4, total=dur+2.4;
+  const oc=new OfflineAudioContext(2, Math.floor(sr*total), sr);
+  const master=oc.createGain(); master.gain.value=0.9;
+  const comp=oc.createDynamicsCompressor(); comp.threshold.value=-18; comp.ratio.value=3; master.connect(comp); comp.connect(oc.destination);
+  const rev=oc.createConvolver(); const rl=Math.floor(sr*2.6), ir=oc.createBuffer(2,rl,sr);
+  for(let c=0;c<2;c++){const d=ir.getChannelData(c);for(let i=0;i<rl;i++)d[i]=(Math.random()*2-1)*Math.pow(1-i/rl,2.6);}
+  rev.buffer=ir; rev.connect(master);
+  const dry=oc.createGain(); dry.gain.value=1; dry.connect(master);
+  const wet=oc.createGain(); wet.gain.value=0.9; wet.connect(rev);
+  const t=0;
+  const sc=needs?{root:146.83,A:[0,3,7,10],B:[2,5,9,12],arp:[12,15,19,22,27,31]}
+                :{root:130.81,A:[0,4,7,12],B:[0,5,9,17],arp:[12,16,19,24,28,31]};
+  const root=sc.root, semi=n=>root*Math.pow(2,n/12), pan=p=>{const x=oc.createStereoPanner();x.pan.value=p;return x;};
+  (()=>{const o=oc.createOscillator(),o2=oc.createOscillator(),g=oc.createGain();o.type='sine';o2.type='sine';
+    o.frequency.setValueAtTime(needs?43:41,t);o2.frequency.setValueAtTime((needs?43:41)*1.5,t);if(needs)o.frequency.linearRampToValueAtTime(54,t+dur*.7);
+    g.gain.setValueAtTime(0,t);g.gain.linearRampToValueAtTime(.6,t+.6);g.gain.setValueAtTime(.6,t+dur*.6);g.gain.exponentialRampToValueAtTime(.0001,t+dur);
+    o.connect(g);o2.connect(g);g.connect(dry);o.start(t);o2.start(t);o.stop(t+dur+.2);o2.stop(t+dur+.2);})();
+  function chord(off,len,offs){const ct=t+off;offs.forEach((nn,idx)=>{const f=semi(nn),o=oc.createOscillator(),o2=oc.createOscillator(),g=oc.createGain(),lp=oc.createBiquadFilter(),pn=pan((idx/(offs.length-1)-.5)*1.2);
+    o.type='sine';o2.type='triangle';o.frequency.setValueAtTime(f,ct);o2.frequency.setValueAtTime(f*1.004,ct);
+    if(needs){o.frequency.linearRampToValueAtTime(f*1.04,ct+len);o2.frequency.linearRampToValueAtTime(f*1.044,ct+len);}
+    lp.type='lowpass';lp.frequency.setValueAtTime(420,ct);lp.frequency.linearRampToValueAtTime(needs?2800:2000,ct+len*.7);
+    g.gain.setValueAtTime(0,ct);g.gain.linearRampToValueAtTime(.10,ct+(needs?.6:.45));g.gain.exponentialRampToValueAtTime(.0001,ct+len+.3);
+    o.connect(lp);o2.connect(lp);lp.connect(g);g.connect(pn);pn.connect(dry);pn.connect(wet);o.start(ct);o2.start(ct);o.stop(ct+len+.4);o2.stop(ct+len+.4);});}
+  chord(0,dur*.58,sc.A); chord(dur*.45,dur*.55,sc.B);
+  function bell(f,ct,amp,pp){const o=oc.createOscillator(),g=oc.createGain(),pn=pan(pp);o.type='triangle';o.frequency.setValueAtTime(f,ct);
+    g.gain.setValueAtTime(0,ct);g.gain.linearRampToValueAtTime(amp,ct+.012);g.gain.exponentialRampToValueAtTime(.0001,ct+1.2);
+    o.connect(g);g.connect(pn);pn.connect(dry);pn.connect(wet);o.start(ct);o.stop(ct+1.3);}
+  sc.arp.forEach((nn,i)=>{const ct=t+.35+i*(needs?.26:.30);bell(semi(nn),ct,.13,(i%2)?.4:-.4);bell(semi(nn+12),ct+.04,.06,(i%2)?-.3:.3);});
+  {const top=sc.arp[sc.arp.length-1]+5;[0,2,4,6].forEach(j=>bell(semi(top-j*3),t+dur*.72+j*.13,.08,j%2?.45:-.45));}
+  const ticks=needs?9:4, gap=needs?.16:.24;
+  for(let k=0;k<ticks;k++){const ct=t+.15+k*gap,o=oc.createOscillator(),g=oc.createGain(),bp=oc.createBiquadFilter(),pn=pan(k%2?.2:-.2);
+    bp.type='bandpass';bp.frequency.value=needs?2600:2200;bp.Q.value=7;o.type='square';o.frequency.value=needs?2600:2200;
+    const amp=.045*(1+k/ticks);g.gain.setValueAtTime(0,ct);g.gain.linearRampToValueAtTime(amp,ct+.004);g.gain.exponentialRampToValueAtTime(.0001,ct+.07);
+    o.connect(bp);bp.connect(g);g.connect(pn);pn.connect(dry);o.start(ct);o.stop(ct+.08);}
+  (()=>{const pt=t+(needs?dur*.72:dur*.5),o=oc.createOscillator(),g=oc.createGain();o.type='sine';o.frequency.setValueAtTime(needs?3000:2500,pt);o.frequency.exponentialRampToValueAtTime(needs?4400:3100,pt+.5);
+    g.gain.setValueAtTime(0,pt);g.gain.linearRampToValueAtTime(.10,pt+.05);g.gain.exponentialRampToValueAtTime(.0001,pt+.8);o.connect(g);g.connect(dry);g.connect(wet);o.start(pt);o.stop(pt+.85);})();
+  if(needs){const len=Math.floor(sr*dur),nb=oc.createBuffer(1,len,sr),d=nb.getChannelData(0);for(let i=0;i<len;i++)d[i]=(Math.random()*2-1)*.5;
+    const src=oc.createBufferSource();src.buffer=nb;const bp=oc.createBiquadFilter();bp.type='bandpass';bp.Q.value=3;bp.frequency.setValueAtTime(300,t);bp.frequency.exponentialRampToValueAtTime(3500,t+dur*.9);
+    const g=oc.createGain();g.gain.setValueAtTime(0,t);g.gain.linearRampToValueAtTime(.05,t+dur*.7);g.gain.exponentialRampToValueAtTime(.0001,t+dur);
+    src.connect(bp);bp.connect(g);g.connect(dry);g.connect(wet);src.start(t);src.stop(t+dur+.1);}
+  return bufToWav(await oc.startRendering());
+}
+(async()=>{
+  try{
+    const done=await renderCue('done'), alert=await renderCue('alert');
+    const r=await fetch('/_savecue',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({done,alert})});
+    document.getElementById('s').textContent = r.ok ? 'SAVED' : ('SAVE FAIL '+r.status);
+  }catch(e){document.getElementById('s').textContent='ERR '+e.message;}
+})();
+</script></body>

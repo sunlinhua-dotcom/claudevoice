@@ -1,0 +1,15 @@
+.env
+.env.*
+!.env.example
+projects.json
+node_modules/
+*.bak
+*.bak.*
+*.opensource-bak
+.DS_Store
+
+cloudflare/.dev.vars
+cloudflare/.wrangler/
+
+# 编译产物（用 mac-app/build.sh 从 main.swift 重新构建）
+mac-app/ClaudeVoice

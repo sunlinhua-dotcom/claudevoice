@@ -1,0 +1,34 @@
+name = "claudevoice"
+main = "src/worker.js"
+compatibility_date = "2026-06-01"
+workers_dev = true
+
+# 静态面板（复用项目根目录的 public/）。Worker 先跑，未命中 API 的再回落到静态资源。
+[assets]
+directory = "../public"
+binding = "ASSETS"
+run_worker_first = true
+
+# 实时广播 + 推送订阅 的有状态实例
+[[durable_objects.bindings]]
+name = "HUB"
+class_name = "Hub"
+
+# Workers AI：用来把完成说明总结+转中文成一句可朗读的话（免费额度内）
+[ai]
+binding = "AI"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Hub"]
+
+# 非敏感配置（敏感项用 wrangler secret put）
+[vars]
+MIMO_BASE = "https://api.xiaomimimo.com/v1"
+MIMO_MODEL = "mimo-v2.5-tts"
+MIMO_VOICE = "mimo_default"
+USER_NAME = "Dev"
+# 手机面板解锁密码（输对就换成真 token 种 cookie，免去手输令牌）。
+# 不要在此处硬编码密码——请用 Cloudflare secret 设置：
+#   wrangler secret put UNLOCK_PASSWORD
+# 未设置时 /unlock 一律拒绝（worker.js 无内置默认值）。

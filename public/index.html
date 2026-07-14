@@ -1,0 +1,821 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#04060d">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="manifest" href="manifest.webmanifest">
+<!-- 图标/分享卡片：用绝对地址 PNG，微信与 iOS 主屏幕才能正确识别（SVG 不被识别）-->
+<link rel="apple-touch-icon" href="https://claudevoice.sunlinhua.workers.dev/assets/apple-touch-icon.png">
+<link rel="icon" type="image/png" sizes="192x192" href="https://claudevoice.sunlinhua.workers.dev/assets/icon-192.png">
+<meta property="og:type" content="website">
+<meta property="og:title" content="ClaudeVoice 语音信号台">
+<meta property="og:description" content="Claude Code 全局语音通知台：任务完成 / 需要你确认时，自动语音播报 + 飞书卡片 + 手机推送。">
+<meta property="og:image" content="https://claudevoice.sunlinhua.workers.dev/assets/icon-512.png">
+<meta property="og:url" content="https://claudevoice.sunlinhua.workers.dev/">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:image" content="https://claudevoice.sunlinhua.workers.dev/assets/icon-512.png">
+<title>ClaudeVoice · 语音信号台</title>
+<style>
+/* ============================================================
+   ClaudeVoice — "语音信号台"
+   命名机制（f5-prompts 风格）：
+   · "starfield"   缓慢漂移的星场 canvas
+   · "sonar"       需要操作时 hero 上扩散的声纳环
+   · "liquid-glass" 卡片的遮罩渐变描边玻璃面
+   · "fade-rise"   新事件淡入上浮
+   动效常量集中在 :root 与 JS 顶部，便于调参。
+   djhh CJK 排版：keep-all + balance + 数字 nowrap + 中英文留空格。
+   ============================================================ */
+:root{
+  --bg:#04060d; --ink:#eaf0ff; --dim:#93a0c0; --dim2:#5b6788;
+  --line:#1c2740; --glass:#0c1426cc; --glass2:#0a1120;
+  --accent:#7c8cff; --good:#46e0b0; --warn:#ffcd5b; --hot:#ff6f8d;
+  --r:18px;
+  --ease:cubic-bezier(.22,.61,.36,1);
+  --fade-rise:.6s; /* 新事件入场 */
+}
+*{box-sizing:border-box;}
+html{hanging-punctuation:allow-end;}
+body{
+  margin:0; min-height:100vh; color:var(--ink);
+  background:#04060d url('assets/cv-bg.png') center/cover no-repeat fixed;
+  font-family:"PingFang SC","Hiragino Sans GB","Inter",system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  font-feature-settings:"tnum","palt"; line-height:1.6; -webkit-font-smoothing:antialiased;
+  overflow-x:hidden;
+}
+/* 深空底：星场 canvas + 两团星云 + 底部吸积盘微光 */
+#starfield{position:fixed; inset:0; z-index:-2; display:block;}
+body::before{
+  content:""; position:fixed; inset:0; z-index:-1; pointer-events:none;
+  background:
+    radial-gradient(900px 520px at 78% -8%, #2a2f6e44, transparent 60%),
+    radial-gradient(760px 460px at 12% 108%, #5a2a6e3a, transparent 60%),
+    radial-gradient(1200px 200px at 50% 116%, #7c8cff22, transparent 70%);
+}
+h1,h2,h3,h4,p,.lead{word-break:keep-all; overflow-wrap:break-word; text-wrap:balance;}
+.num,.time,.badge,.tag,.pill{white-space:nowrap; font-variant-numeric:tabular-nums;}
+
+/* ===== 顶栏 ===== */
+.top{
+  position:sticky; top:0; z-index:20; display:flex; align-items:center; gap:14px;
+  padding:14px 24px; background:linear-gradient(180deg,#04060def,#04060d99 60%,transparent);
+  backdrop-filter:blur(10px);
+}
+.logo{display:flex; align-items:center; gap:12px; font-weight:700; font-size:18px; letter-spacing:.3px;}
+.orbit{position:relative; width:30px; height:30px; flex:none;}
+.orbit::before{content:""; position:absolute; inset:0; border-radius:50%;
+  background:radial-gradient(circle at 50% 50%, #fff, #9aa8ff 38%, #3a2a6e 70%, transparent 72%);
+  box-shadow:0 0 16px #7c8cffaa;}
+.orbit::after{content:""; position:absolute; inset:-3px; border-radius:50%;
+  border:1px solid #7c8cff66; border-top-color:transparent; border-bottom-color:transparent;
+  animation:spin 6s linear infinite;}
+@keyframes spin{to{transform:rotate(360deg)}}
+.logo small{color:var(--dim); font-weight:500; font-size:12px; margin-left:2px;}
+.spacer{flex:1;}
+.hi{font-size:13px; color:var(--dim);}
+.hi b{color:var(--accent); letter-spacing:.5px;}
+.conn{display:flex; align-items:center; gap:7px; font-size:13px; color:var(--dim); margin-left:14px;}
+.dot{width:9px; height:9px; border-radius:50%; background:var(--dim2);}
+.dot.on{background:var(--good); box-shadow:0 0 10px var(--good); animation:beat 2s infinite;}
+.dot.off{background:var(--hot); box-shadow:0 0 10px var(--hot);}
+@keyframes beat{0%,100%{opacity:1}50%{opacity:.45}}
+
+.wrap{max-width:1000px; margin:0 auto; padding:22px 24px 90px;}
+
+/* ===== 控件 ===== */
+.controls{display:flex; flex-wrap:wrap; gap:10px; align-items:center; margin-bottom:22px;}
+.btn{font:inherit; cursor:pointer; border:1px solid var(--line); background:#0e1730aa; color:var(--ink);
+  padding:9px 15px; border-radius:11px; font-size:13px; transition:.16s var(--ease);
+  display:inline-flex; align-items:center; gap:7px; backdrop-filter:blur(6px);}
+.btn:hover{border-color:var(--accent); background:#16204099; transform:translateY(-1px);}
+.btn.primary{background:linear-gradient(135deg,#7c8cff,#9a6bff); border:none; font-weight:600; box-shadow:0 6px 22px #7c8cff55;}
+.btn.primary:hover{filter:brightness(1.08);}
+.btn.on{border-color:var(--good); color:var(--good);}
+.btn.off{border-color:var(--dim2); color:var(--dim);}
+
+/* ===== 启用语音遮罩 ===== */
+.gate{position:fixed; inset:0; z-index:50; display:grid; place-items:center; text-align:center;
+  background:radial-gradient(700px 500px at 50% 40%, #0a1230f2, #04060df8); backdrop-filter:blur(10px);}
+.gate.hidden{display:none;}
+.gate .inner{max-width:440px; padding:30px;}
+.bigmark{width:96px; height:96px; border-radius:50%; margin:0 auto 22px; position:relative;}
+.bigmark::before{content:""; position:absolute; inset:0; border-radius:50%;
+  background:radial-gradient(circle at 50% 45%, #fff, #9aa8ff 36%, #4a2f8e 70%, #160e34 86%);
+  box-shadow:0 0 60px #7c8cff88, inset 0 0 30px #00000066;}
+.bigmark::after{content:""; position:absolute; inset:-14px; border-radius:50%;
+  border:1px solid #7c8cff55; animation:ping 2.4s var(--ease) infinite;}
+@keyframes ping{0%{transform:scale(.85); opacity:.9}100%{transform:scale(1.5); opacity:0}}
+.gate h2{font-size:25px; margin:6px 0 10px;}
+.gate p{color:var(--dim); max-width:32ch; margin:0 auto 26px; line-height:1.7;}
+
+/* ===== hero 信号面板 ===== */
+.hero{position:relative; border-radius:var(--r); padding:30px 30px; margin-bottom:24px; overflow:hidden;
+  background:linear-gradient(180deg,#0c142699,#0a112099); border:1px solid var(--line);
+  transition:.35s var(--ease);}
+.hero.act{border-color:transparent;}
+.hero.act::after{content:""; position:absolute; inset:0; border-radius:var(--r); padding:1.5px; pointer-events:none;
+  background:linear-gradient(120deg,var(--c,#7c8cff),transparent 55%);
+  -webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0); -webkit-mask-composite:xor; mask-composite:exclude;}
+/* 声纳环（需要操作时）——由音频驱动缩放 */
+.sonar{position:absolute; left:42px; top:46px; width:14px; height:14px; pointer-events:none; opacity:0; transition:opacity .3s;}
+.hero.act .sonar{opacity:1;}
+.sonar i{position:absolute; left:50%; top:50%; width:14px; height:14px; margin:-7px 0 0 -7px; border-radius:50%;
+  border:1.5px solid var(--c,#7c8cff); transform:scale(1); opacity:0;}
+.hero.act .sonar i{animation:sonar 2.2s var(--ease) infinite;}
+.sonar i:nth-child(2){animation-delay:.7s;} .sonar i:nth-child(3){animation-delay:1.4s;}
+@keyframes sonar{0%{transform:scale(1); opacity:.7}100%{transform:scale(7); opacity:0}}
+.hero .row{display:flex; align-items:center; gap:12px; margin-bottom:14px;}
+.pdot{width:13px; height:13px; border-radius:50%; background:var(--c,#7c8cff); box-shadow:0 0 14px var(--c,#7c8cff); flex:none;}
+.pname{font-weight:700; font-size:15px;}
+.vtag{font-size:11px; color:var(--dim); border:1px solid var(--line); padding:2px 8px; border-radius:999px;}
+.htitle{font-size:30px; font-weight:700; line-height:1.14; margin:2px 0 8px;}
+.hero.idle .htitle{color:var(--dim);}
+.hdetail{color:var(--dim); font-size:15px; max-width:54ch; line-height:1.65;}
+.time{margin-left:auto; color:var(--dim2); font-size:12px;}
+.acts{margin-top:22px; display:flex; gap:10px; flex-wrap:wrap;}
+/* 声波条（说话时跳动）*/
+.wave{display:flex; align-items:flex-end; gap:3px; height:18px; margin-left:6px;}
+.wave i{width:3px; height:4px; background:var(--c,#7c8cff); border-radius:2px; transition:height .08s linear;}
+
+.badge{font-size:12px; padding:3px 10px; border-radius:999px; font-weight:600; background:#ffffff14;}
+.badge.done{background:#46e0b022; color:#7ff0cf;}
+.badge.waiting{background:#ffcd5b22; color:#ffe09a;}
+.badge.permission{background:#ff6f8d22; color:#ffb0c1;}
+.badge.notification{background:#7c8cff22; color:#b9c2ff;}
+.badge.subagent{background:#9a6bff22; color:#d2bcff;}
+
+/* ===== 音色中心 ===== */
+.panel{border:1px solid var(--line); border-radius:var(--r); background:#0a112088; margin-bottom:24px; overflow:hidden;}
+.panel summary{cursor:pointer; list-style:none; padding:16px 20px; font-size:14px; font-weight:600; display:flex; align-items:center; gap:10px;}
+.panel summary::-webkit-details-marker{display:none;}
+.panel summary .chev{margin-left:auto; color:var(--dim2); transition:.2s;}
+.panel[open] summary .chev{transform:rotate(90deg);}
+.panel .pad{padding:4px 20px 20px;}
+.panel h4{font-size:12px; color:var(--dim2); letter-spacing:.5px; text-transform:uppercase; margin:14px 0 10px;}
+.vgrid{display:grid; grid-template-columns:repeat(auto-fill,minmax(150px,1fr)); gap:10px;}
+.vchip{display:flex; align-items:center; gap:9px; padding:10px 12px; border:1px solid var(--line); border-radius:12px; background:#0e1730aa; cursor:pointer; transition:.15s var(--ease);}
+.vchip:hover{border-color:var(--accent); transform:translateY(-1px);}
+.vchip .g{width:24px; height:24px; border-radius:8px; display:grid; place-items:center; font-size:13px; flex:none;}
+.vchip .g.m{background:#3b6cff2a; color:#9db8ff;} .vchip .g.f{background:#ff6fae2a; color:#ffb0d4;}
+.vchip .nm{font-size:14px; font-weight:600;} .vchip .sub{font-size:11px; color:var(--dim2);}
+.vchip .pl{margin-left:auto; color:var(--dim2); font-size:14px;}
+.prow{display:flex; align-items:center; gap:10px; padding:9px 0; border-top:1px solid var(--line);}
+.prow .pdot{width:10px; height:10px;}
+.prow .nm{font-size:14px; flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+.prow select{font:inherit; font-size:13px; background:#0e1730; color:var(--ink); border:1px solid var(--line); border-radius:9px; padding:6px 8px;}
+.muted{color:var(--dim2); font-size:13px; padding:8px 0;}
+
+/* ===== 事件流 ===== */
+.feed h3{font-size:12px; color:var(--dim2); font-weight:600; letter-spacing:.6px; text-transform:uppercase; margin:0 0 12px;}
+.item{display:flex; gap:14px; padding:15px 16px; border-radius:14px; margin-bottom:10px; cursor:pointer;
+  position:relative; overflow:hidden; border:1px solid var(--line); background:linear-gradient(180deg,#0c142688,#0a112088);
+  transition:.16s var(--ease);}
+.item::before{content:""; position:absolute; left:0; top:0; bottom:0; width:3px; background:var(--c,#7c8cff);}
+.item:hover{border-color:#2a3a60; transform:translateY(-1px);}
+.item.rise{animation:rise var(--fade-rise) var(--ease);}
+@keyframes rise{from{opacity:0; transform:translateY(12px)}to{opacity:1; transform:none}}
+.item .ic{width:32px; height:32px; border-radius:10px; flex:none; display:grid; place-items:center; font-size:15px; background:var(--cbg,#7c8cff22);}
+.item .body{flex:1; min-width:0;}
+.item .l1{display:flex; align-items:center; gap:9px; margin-bottom:3px; flex-wrap:wrap;}
+.item .pn{font-weight:600; font-size:14px;}
+.item .gi{font-size:11px;}
+.item .dt{color:var(--dim); font-size:13px; max-width:62ch; line-height:1.55; overflow:hidden; text-overflow:ellipsis;
+  display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical;}
+.item .pl{align-self:center; color:var(--dim2); font-size:18px; opacity:.6; flex:none;}
+.item:hover .pl{opacity:1; color:var(--accent);}
+.empty{color:var(--dim2); text-align:center; padding:34px; font-size:14px;}
+.hint{color:var(--dim2); font-size:12px; margin-top:28px; line-height:1.8;}
+.hint code{background:#ffffff10; padding:1px 6px; border-radius:5px;}
+
+/* 玻璃质感：卡片/面板透出底层星云，增加纵深 */
+.hero,.item,.panel{ backdrop-filter:blur(12px) saturate(1.15); -webkit-backdrop-filter:blur(12px) saturate(1.15); }
+.hero,.panel{ box-shadow:0 1px 0 #ffffff10 inset, 0 18px 50px -28px #000a; }
+.item{ box-shadow:0 1px 0 #ffffff0a inset; }
+@media (max-width:560px){ .htitle{font-size:24px;} .wrap{padding:18px 16px 80px;} }
+@media (prefers-reduced-motion:reduce){
+  #starfield{display:none;}
+  .orbit::after,.hero.act .sonar i,.bigmark::after,.item.rise{animation:none;}
+}
+
+/* ===================== 浅色主题（覆盖上面的深色）===================== */
+:root{
+  --bg:#eef1f8; --ink:#1b2233; --dim:#5b6479; --dim2:#9aa3b6;
+  --line:#e3e7f1; --glass:rgba(255,255,255,.72); --glass2:rgba(255,255,255,.55);
+  --accent:#6366f1; --good:#12b886; --warn:#e0890b; --hot:#ef4476;
+}
+body{ background:#eef1f8 url('assets/cv-bg-light.png') center/cover no-repeat fixed; }
+body::before{
+  background:
+    radial-gradient(900px 520px at 80% -10%, rgba(140,130,255,.12), transparent 60%),
+    radial-gradient(760px 460px at 8% 112%, rgba(120,180,255,.12), transparent 60%);
+}
+.top{ background:linear-gradient(180deg, rgba(248,250,253,.92), rgba(248,250,253,.5) 60%, transparent); border-bottom:1px solid rgba(225,230,242,.7); }
+.orbit::before{ box-shadow:0 0 16px rgba(99,102,241,.45); }
+.orbit::after{ border-color:rgba(99,102,241,.45); border-top-color:transparent; border-bottom-color:transparent; }
+.btn{ background:rgba(255,255,255,.72); color:var(--ink); border:1px solid var(--line); }
+.btn:hover{ background:#fff; border-color:var(--accent); box-shadow:0 6px 16px -10px rgba(40,50,90,.45); }
+.btn.primary{ background:linear-gradient(135deg,#6366f1,#8b5cf6); color:#fff; border:none; box-shadow:0 10px 24px -10px rgba(99,102,241,.6); }
+.btn.on{ border-color:var(--good); color:#0f9468; }
+.btn.off{ border-color:var(--dim2); color:var(--dim); }
+.gate{ background:radial-gradient(720px 520px at 50% 38%, rgba(255,255,255,.6), rgba(238,241,248,.96)); }
+.gate h2{ color:var(--ink); }
+.bigmark::before{ box-shadow:0 0 60px rgba(124,140,255,.5), inset 0 0 30px rgba(0,0,0,.12); }
+.bigmark::after{ border-color:rgba(99,102,241,.4); }
+.hero{ background:var(--glass); border:1px solid var(--line); }
+.badge{ background:rgba(27,34,51,.06); color:var(--dim); }
+.badge.done{ background:rgba(18,184,134,.15); color:#0f9468; }
+.badge.waiting{ background:rgba(224,137,11,.16); color:#a9640a; }
+.badge.permission{ background:rgba(239,68,118,.14); color:#d61f57; }
+.badge.notification{ background:rgba(99,102,241,.14); color:#4f46e5; }
+.badge.subagent{ background:rgba(139,92,246,.14); color:#7c3aed; }
+.panel{ background:var(--glass); border:1px solid var(--line); }
+.vchip{ background:rgba(255,255,255,.62); border:1px solid var(--line); }
+.vchip:hover{ background:#fff; border-color:var(--accent); }
+.vchip .g.m{ background:rgba(59,108,255,.14); color:#3b5bd9; }
+.vchip .g.f{ background:rgba(255,111,174,.16); color:#d6478f; }
+.prow{ border-top:1px solid var(--line); }
+.prow select{ background:#fff; color:var(--ink); border:1px solid var(--line); }
+.item{ background:var(--glass); border:1px solid var(--line); }
+.item:hover{ border-color:#cdd5e6; box-shadow:0 10px 24px -16px rgba(40,50,90,.4); }
+.item .ic{ background:var(--cbg, rgba(99,102,241,.14)); }
+.empty,.muted,.hint{ color:var(--dim2); }
+.hint code{ background:rgba(27,34,51,.06); color:var(--dim); }
+.hero,.panel{ box-shadow:0 1px 0 rgba(255,255,255,.9) inset, 0 22px 50px -30px rgba(30,40,80,.3); }
+.item{ box-shadow:0 1px 0 rgba(255,255,255,.9) inset, 0 10px 26px -22px rgba(30,40,80,.28); }
+.hero,.item,.panel{ backdrop-filter:blur(14px) saturate(1.2); -webkit-backdrop-filter:blur(14px) saturate(1.2); }
+</style>
+</head>
+<body>
+<canvas id="starfield"></canvas>
+
+<!-- 启用遮罩 -->
+<div class="gate" id="gate">
+  <div class="inner">
+    <div class="bigmark"></div>
+    <h2>开启语音信号台</h2>
+    <p>浏览器需要一次点击才能自动播放声音。点开后保持此页打开，所有项目的提醒都会带音效自动播报。</p>
+    <button class="btn primary" id="enableBtn" style="font-size:15px; padding:13px 26px;">点击启用语音播报</button>
+  </div>
+</div>
+
+<div class="top">
+  <div class="logo"><span class="orbit"></span>ClaudeVoice <small>语音信号台</small></div>
+  <div class="spacer"></div>
+  <div class="hi">欢迎回来，<b id="userName">Dev</b></div>
+  <div class="conn"><span class="dot" id="connDot"></span><span id="connTxt">连接中…</span></div>
+</div>
+
+<div class="wrap">
+  <div class="controls">
+    <button class="btn on" id="muteBtn">🔔 语音开</button>
+    <button class="btn on" id="repeatBtn">🔁 循环提醒开</button>
+    <button class="btn" id="testBtn">▶ 测试一条</button>
+    <span class="btn" style="gap:9px;cursor:default">🔊 <input type="range" id="volRange" min="0" max="120" value="100" style="width:96px;accent-color:var(--accent);cursor:pointer"></span>
+    <button class="btn" id="pushBtn" style="display:none">📱 开启手机推送</button>
+    <button class="btn" id="clearBtn">清空记录</button>
+  </div>
+
+  <div class="hero idle" id="hero">
+    <div class="sonar"><i></i><i></i><i></i></div>
+    <div class="row">
+      <span class="pdot" id="hpdot" style="opacity:.3"></span>
+      <span class="pname" id="hpname">暂无提醒</span>
+      <span class="vtag" id="hvtag" style="display:none"></span>
+      <span class="badge" id="hbadge" style="display:none"></span>
+      <span class="wave" id="hwave" style="display:none"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span>
+      <span class="time" id="htime"></span>
+    </div>
+    <div class="htitle" id="htitle">等待 Claude 的信号…</div>
+    <div class="hdetail" id="hdetail">任何项目完成任务或需要你确认时，这里会亮起、响起星际音效并自动语音播报。</div>
+    <div class="acts" id="hacts" style="display:none">
+      <button class="btn primary" id="ackBtn">✓ 我知道了（停止提醒）</button>
+      <button class="btn" id="replayBtn">▶ 重播</button>
+    </div>
+  </div>
+
+  <details class="panel" id="vpanel">
+    <summary>🎙️ 音色中心 · 试听 / 给项目分配男女声 <span class="chev">›</span></summary>
+    <div class="pad">
+      <h4>全部音色（点击试听）</h4>
+      <div class="vgrid" id="vgrid"></div>
+      <h4>各项目当前音色（可改）</h4>
+      <div id="plist"><div class="muted">出现过的项目会在这里列出，可单独换音色。</div></div>
+    </div>
+  </details>
+
+  <div class="feed">
+    <h3>信号记录</h3>
+    <div id="feed"><div class="empty">还没有信号。</div></div>
+  </div>
+
+  <div class="hint">
+    保持此页打开即可。本机地址 <code id="origin"></code> ·
+    外网访问用 Cloudflare Tunnel 并设 <code>DASH_TOKEN</code>（见 README）。
+  </div>
+</div>
+
+<script>
+(function(){
+'use strict';
+/* ---------- 动效/音效常量 ---------- */
+// 语音在"音效完整放完之后"才进（前奏时长 needs=4.2s / done=3.4s，留一点点间隙）
+var CUE_LEAD_ACT = 4350;   // 需要操作
+var CUE_LEAD_DONE = 3550;  // 完成
+var REPEAT_EVERY = 30000;  // 没操作就每 30 秒反复提醒
+var FEED_MAX = 60;
+
+/* ---------- 令牌 ---------- */
+var TOKEN = new URLSearchParams(location.search).get('token') || '';
+function withTok(p){ return p + (TOKEN ? (p.indexOf('?')>=0?'&':'?')+'token='+encodeURIComponent(TOKEN) : ''); }
+document.getElementById('origin').textContent = location.origin;
+
+/* ---------- 设置 ---------- */
+var S = Object.assign({muted:false, repeat:true, volume:1}, JSON.parse(localStorage.getItem('cv_settings')||'{}'));
+function saveS(){ localStorage.setItem('cv_settings', JSON.stringify(S)); }
+var VOVR = JSON.parse(localStorage.getItem('cv_voices')||'{}');  // 项目→音色 覆盖
+function saveVOVR(){ localStorage.setItem('cv_voices', JSON.stringify(VOVR)); }
+
+var CFG = { voicePool:[{name:'Mia',gender:'f'},{name:'Dean',gender:'m'}], userName:'Dev', defaultVoice:'Mia', vapidPublic:'' };
+var SEEN = {};  // projectKey → {name, color, voice}
+
+/* =========================================================
+   音频图：masterGain → compressor → analyser → destination
+   ========================================================= */
+var audioCtx=null, masterGain=null, analyser=null, audioReady=false, freqData=null, reverb=null;
+var player=new Audio(); player.preload='auto';
+function ensureGraph(){
+  if(!audioCtx) audioCtx=new (window.AudioContext||window.webkitAudioContext)();
+  if(audioCtx.state==='suspended') audioCtx.resume();
+  if(!masterGain){
+    masterGain=audioCtx.createGain(); masterGain.gain.value=(typeof S.volume==='number'?S.volume:1);
+    var comp=audioCtx.createDynamicsCompressor();           // 增加穿透/响度一致性
+    comp.threshold.value=-20; comp.ratio.value=3.5; comp.attack.value=.003; comp.release.value=.25;
+    analyser=audioCtx.createAnalyser(); analyser.fftSize=256; freqData=new Uint8Array(analyser.frequencyBinCount);
+    masterGain.connect(comp); comp.connect(analyser); analyser.connect(audioCtx.destination);
+    // 卷积混响（合成脉冲响应），让音效更空灵好听
+    reverb=audioCtx.createConvolver();
+    var rl=Math.floor(audioCtx.sampleRate*2.8), ir=audioCtx.createBuffer(2,rl,audioCtx.sampleRate);
+    for(var ch=0;ch<2;ch++){ var dch=ir.getChannelData(ch); for(var i=0;i<rl;i++) dch[i]=(Math.random()*2-1)*Math.pow(1-i/rl,2.6); }
+    reverb.buffer=ir; reverb.connect(masterGain);
+  }
+}
+function unlock(){
+  try{ ensureGraph(); }catch(e){}
+  player.muted=true; player.play().catch(function(){}).finally(function(){player.muted=false;});
+  audioReady=true;
+}
+
+/* =========================================================
+   星际穿越式提醒音效（程序合成）
+   管风琴涌升 + 滴答"时间动机" + 穿透泛音 + 低频体感
+   ========================================================= */
+/* 场景库：随机换根音 + 和弦走向 + 琶音，做到"更多、不重复、好听" */
+var CUE_DONE=[
+  {root:130.81, A:[0,4,7,12], B:[0,5,9,17], arp:[12,16,19,24,28,31]},   // C 大调，温暖收束
+  {root:146.83, A:[0,4,7,11], B:[2,7,11,14], arp:[12,16,23,24,31,35]},  // D 明亮上扬
+  {root:174.61, A:[0,4,9,12], B:[-3,4,7,12], arp:[12,19,24,28,31,36]},  // F 宽广
+  {root:196.00, A:[0,5,7,12], B:[0,4,9,16], arp:[12,17,19,24,29,36]},   // G 挂留转明亮
+  {root:155.56, A:[0,4,7,14], B:[-5,2,7,12], arp:[14,19,23,26,31,38]},  // bE add9 空灵
+  {root:220.00, A:[0,3,7,12], B:[0,5,8,15], arp:[12,15,19,24,27,32]},   // A 柔和
+  {root:164.81, A:[0,4,7,12], B:[5,9,12,16], arp:[12,16,19,28,31,35]},  // E 上行收束
+];
+var CUE_NEEDS=[
+  {root:146.83, A:[0,3,7,10], B:[2,5,9,12], arp:[12,15,19,22,27,31]},   // D 小七，上行
+  {root:130.81, A:[0,3,7,12], B:[3,7,10,15], arp:[12,15,18,24,27,30]},  // C 悬疑推进
+  {root:164.81, A:[0,3,8,12], B:[1,8,12,15], arp:[12,15,20,24,29,32]},  // E 紧张攀升
+  {root:138.59, A:[0,2,7,12], B:[2,5,10,14], arp:[12,14,19,22,26,31]},  // bD 挂二渐紧
+  {root:174.61, A:[0,3,7,11], B:[3,8,12,17], arp:[12,15,20,23,29,34]},  // F 小大七，不安
+  {root:123.47, A:[0,5,8,12], B:[1,6,10,15], arp:[12,17,20,25,29,34]},  // B 低沉悬疑
+  {root:155.56, A:[0,3,7,10], B:[5,8,12,15], arp:[12,15,19,24,29,33]},  // bE 推进攀升
+];
+function playCue(kind){
+  if(!audioCtx) return 0;
+  ensureGraph();
+  var t=audioCtx.currentTime;
+  var needs=(kind==='waiting'||kind==='permission');
+  var dur=needs?4.2:3.4;                       // 更长
+
+  var dry=audioCtx.createGain(); dry.gain.value=1.0; dry.connect(masterGain);
+  var wet=audioCtx.createGain(); wet.gain.value=0.9; wet.connect(reverb);
+
+  var list=needs?CUE_NEEDS:CUE_DONE;
+  var sc=list[Math.floor(Math.random()*list.length)];
+  var root=sc.root*(Math.random()<0.33?0.5:1);   // 偶尔降一个八度，更厚
+  function semi(n){ return root*Math.pow(2,n/12); }
+  function pan(p){ try{ var n=audioCtx.createStereoPanner(); n.pan.value=p; return n; }catch(e){ return audioCtx.createGain(); } }
+  function rnd(a,b){ return a+Math.random()*(b-a); }
+  function chance(p){ return Math.random()<p; }
+  // 随机"音色质地"——每次听感都不同
+  var FLA = {
+    padWave: chance(0.5)?'triangle':'sawtooth',     // 和弦的第二振荡器
+    arpWave: chance(0.5)?'triangle':'sine',          // 琶音波形
+    arpGap:  rnd(needs?0.20:0.24, needs?0.30:0.36),  // 琶音速度
+    doubleArp: chance(0.45),                          // 叠高八度琶音
+    bells: chance(0.5),                               // 收尾加一串风铃
+    tickF: (needs?2600:2200)*rnd(0.85,1.2),          // 滴答音高
+    tickQ: rnd(5,9),
+    swirl: chance(0.4),                               // 立体声左右摆动
+  };
+
+  // 1) 低频体感（穿透）+ 缓慢上行
+  (function(){
+    var o=audioCtx.createOscillator(), o2=audioCtx.createOscillator(), g=audioCtx.createGain();
+    o.type='sine'; o2.type='sine';
+    o.frequency.setValueAtTime(needs?43:41,t); o2.frequency.setValueAtTime((needs?43:41)*1.5,t);
+    if(needs) o.frequency.linearRampToValueAtTime(54,t+dur*.7);
+    g.gain.setValueAtTime(0,t); g.gain.linearRampToValueAtTime(.6,t+.6); g.gain.setValueAtTime(.6,t+dur*.6); g.gain.exponentialRampToValueAtTime(.0001,t+dur);
+    o.connect(g); o2.connect(g); g.connect(dry); o.start(t); o2.start(t); o.stop(t+dur+.2); o2.stop(t+dur+.2);
+  })();
+
+  // 2) 管风琴和弦 A → B（情绪推进），微失谐 + 滤波打开 + 立体声铺开，干+湿
+  function chord(off, len, offs){
+    var ct=t+off;
+    offs.forEach(function(n,idx){
+      var f=semi(n), o=audioCtx.createOscillator(), o2=audioCtx.createOscillator(), g=audioCtx.createGain(),
+          lp=audioCtx.createBiquadFilter(), pn=pan((idx/(offs.length-1)-0.5)*1.2);
+      o.type='sine'; o2.type=FLA.padWave;
+      o.frequency.setValueAtTime(f,ct); o2.frequency.setValueAtTime(f*1.004,ct);
+      if(needs){ o.frequency.linearRampToValueAtTime(f*1.04,ct+len); o2.frequency.linearRampToValueAtTime(f*1.044,ct+len); }
+      lp.type='lowpass'; lp.frequency.setValueAtTime(420,ct); lp.frequency.linearRampToValueAtTime(needs?2800:2000,ct+len*.7);
+      g.gain.setValueAtTime(0,ct); g.gain.linearRampToValueAtTime(.10,ct+(needs?.6:.45)); g.gain.exponentialRampToValueAtTime(.0001,ct+len+.3);
+      o.connect(lp); o2.connect(lp); lp.connect(g); g.connect(pn); pn.connect(dry); pn.connect(wet);
+      o.start(ct); o2.start(ct); o.stop(ct+len+.4); o2.stop(ct+len+.4);
+    });
+  }
+  chord(0, dur*0.58, sc.A);
+  chord(dur*0.45, dur*0.55, sc.B);
+
+  // 3) 上行琶音风铃（"星际"那种攀升感），长尾混响；波形/速度/八度每次随机
+  function bell(f, ct, amp, panp){
+    var o=audioCtx.createOscillator(), g=audioCtx.createGain(), pn=pan(panp);
+    o.type=FLA.arpWave; o.frequency.setValueAtTime(f,ct);
+    g.gain.setValueAtTime(0,ct); g.gain.linearRampToValueAtTime(amp,ct+.012); g.gain.exponentialRampToValueAtTime(.0001,ct+1.2);
+    o.connect(g); g.connect(pn); pn.connect(dry); pn.connect(wet);
+    o.start(ct); o.stop(ct+1.3);
+  }
+  sc.arp.forEach(function(n,i){
+    var ct=t+0.35+i*FLA.arpGap;
+    bell(semi(n), ct, .13, (i%2)?0.4:-0.4);
+    if(FLA.doubleArp) bell(semi(n+12), ct+.04, .06, (i%2)?-0.3:0.3);  // 叠高八度
+  });
+  // 收尾再撒一串下行风铃（更丰富）
+  if(FLA.bells){ var top=sc.arp[sc.arp.length-1]+5;
+    [0,2,4,6].forEach(function(j){ bell(semi(top-j*3), t+dur*0.72+j*0.13, .08, j%2?0.45:-0.45); });
+  }
+
+  // 4) 滴答时间动机（渐强、穿透、左右交替；音高/密度每次随机）
+  var ticks=needs?9:4, gap=needs?.16:.24;
+  for(var k=0;k<ticks;k++){ (function(k){
+    var ct=t+.15+k*gap, o=audioCtx.createOscillator(), g=audioCtx.createGain(), bp=audioCtx.createBiquadFilter(),
+        pn=pan(FLA.swirl ? Math.sin(k*0.9)*0.5 : (k%2?0.2:-0.2));
+    bp.type='bandpass'; bp.frequency.value=FLA.tickF; bp.Q.value=FLA.tickQ;
+    o.type='square'; o.frequency.value=FLA.tickF;
+    var amp=.045*(1+k/ticks);
+    g.gain.setValueAtTime(0,ct); g.gain.linearRampToValueAtTime(amp,ct+.004); g.gain.exponentialRampToValueAtTime(.0001,ct+.07);
+    o.connect(bp); bp.connect(g); g.connect(pn); pn.connect(dry); o.start(ct); o.stop(ct+.08);
+  })(k); }
+
+  // 5) 顶点穿透泛音（干+湿）
+  (function(){
+    var pt=t+(needs?dur*.72:dur*.5), o=audioCtx.createOscillator(), g=audioCtx.createGain();
+    o.type='sine'; o.frequency.setValueAtTime(needs?3000:2500,pt); o.frequency.exponentialRampToValueAtTime(needs?4400:3100,pt+.5);
+    g.gain.setValueAtTime(0,pt); g.gain.linearRampToValueAtTime(.10,pt+.05); g.gain.exponentialRampToValueAtTime(.0001,pt+.8);
+    o.connect(g); g.connect(dry); g.connect(wet); o.start(pt); o.stop(pt+.85);
+  })();
+
+  // 6) 上行氛围噪声（仅 needs，增加张力）
+  if(needs){ (function(){
+    var len=Math.floor(audioCtx.sampleRate*dur), buf=audioCtx.createBuffer(1,len,audioCtx.sampleRate), d=buf.getChannelData(0);
+    for(var i=0;i<len;i++) d[i]=(Math.random()*2-1)*0.5;
+    var src=audioCtx.createBufferSource(); src.buffer=buf;
+    var bp=audioCtx.createBiquadFilter(); bp.type='bandpass'; bp.Q.value=3;
+    bp.frequency.setValueAtTime(300,t); bp.frequency.exponentialRampToValueAtTime(3500,t+dur*.9);
+    var g=audioCtx.createGain(); g.gain.setValueAtTime(0,t); g.gain.linearRampToValueAtTime(.05,t+dur*.7); g.gain.exponentialRampToValueAtTime(.0001,t+dur);
+    src.connect(bp); bp.connect(g); g.connect(dry); g.connect(wet); src.start(t); src.stop(t+dur+.1);
+  })(); }
+
+  return needs?CUE_LEAD_ACT:CUE_LEAD_DONE;
+}
+
+/* =========================================================
+   播放队列：前奏 → 语音；带超时兜底防死锁
+   item = {text, kind, style, voice, cue}
+   ========================================================= */
+var queue=[], speaking=false, cueIdle=true;
+function enqueue(it){ queue.push(it); drain(); }
+function speak(text, kind, style, voice, cue){ enqueue({text:text, kind:kind, style:style||'', voice:voice, cue:cue!==false}); }
+function drain(){
+  if(speaking || !queue.length) return;
+  if(S.muted || !audioReady){ queue.length=0; return; }
+  speaking=true; setSpeakingUI(true);
+  var it=queue.shift();
+  var t0=(performance&&performance.now)?performance.now():Date.now();
+  var doCue=it.cue && cueIdle;        // 密集事件只第一条放音效，避免连放像警报
+  if(doCue) cueIdle=false;
+  var lead=doCue ? playCue(it.kind) : 0;
+  fetch(withTok('/tts'),{method:'POST',headers:{'Content-Type':'application/json','X-CV-Token':TOKEN},
+    body:JSON.stringify({text:it.text, voice:it.voice||CFG.defaultVoice, style:it.style||'', format:'mp3'})})
+    .then(function(r){ if(!r.ok) throw new Error('tts '+r.status); return r.arrayBuffer(); })
+    .then(function(buf){
+      var now=(performance&&performance.now)?performance.now():Date.now();
+      var wait=Math.max(0, lead-(now-t0));
+      return delay(wait).then(function(){ return playBuffer(buf); });
+    })
+    .then(done).catch(function(e){ console.warn('播放失败',e); done(); });
+  function done(){ speaking=false; setSpeakingUI(false); if(!queue.length) cueIdle=true; setTimeout(drain,140); }
+}
+function delay(ms){ return new Promise(function(res){ setTimeout(res, ms); }); }
+function playBuffer(arrayBuf){
+  return new Promise(function(resolve){
+    var settled=false, guard=setTimeout(function(){ if(!settled){settled=true; resolve();} }, 30000);
+    function fin(){ if(!settled){ settled=true; clearTimeout(guard); resolve(); } }
+    if(audioCtx){
+      ensureGraph();
+      audioCtx.decodeAudioData(arrayBuf.slice(0),
+        function(audioBuf){
+          var src=audioCtx.createBufferSource(); src.buffer=audioBuf; src.connect(masterGain);
+          src.onended=fin;
+          clearTimeout(guard); guard=setTimeout(fin,(audioBuf.duration*1000)+3000);
+          try{ src.start(0); }catch(e){ fin(); }
+        },
+        function(){ fallbackPlay(arrayBuf).then(fin); });
+    } else { fallbackPlay(arrayBuf).then(fin); }
+  });
+}
+function fallbackPlay(arrayBuf){
+  return new Promise(function(resolve){
+    try{ var url=URL.createObjectURL(new Blob([arrayBuf],{type:'audio/mpeg'}));
+      player.src=url; player.onended=player.onerror=function(){ URL.revokeObjectURL(url); resolve(); };
+      player.play().catch(function(){ resolve(); });
+    }catch(e){ resolve(); }
+  });
+}
+
+/* ---------- 声波/声纳：音频驱动 ---------- */
+var waveBars=null;
+function setSpeakingUI(on){
+  var w=document.getElementById('hwave'); if(w) w.style.display=on?'flex':'none';
+}
+function audioRAF(){
+  if(analyser && (speaking)){
+    analyser.getByteFrequencyData(freqData);
+    var sum=0; for(var i=0;i<24;i++) sum+=freqData[i]; var lvl=Math.min(1,(sum/24)/170);
+    if(!waveBars) waveBars=document.querySelectorAll('#hwave i');
+    for(var b=0;b<waveBars.length;b++){
+      var h=4+lvl*16*(0.5+Math.abs(Math.sin((Date.now()/90)+b)));
+      waveBars[b].style.height=h.toFixed(0)+'px';
+    }
+  }
+  requestAnimationFrame(audioRAF);
+}
+requestAnimationFrame(audioRAF);
+
+/* =========================================================
+   颜色 / 图标
+   ========================================================= */
+function hueOf(k){ var h=0; for(var i=0;i<k.length;i++) h=(h*31+k.charCodeAt(i))>>>0; return h%360; }
+function colorOf(ev){
+  if(ev.color) return {accent:ev.color, bg:ev.color+'22'};
+  var h=hueOf(ev.projectKey||ev.project||'x');
+  return {accent:'hsl('+h+',75%,66%)', bg:'hsla('+h+',75%,60%,.16)'};
+}
+var KICON={done:'✅',waiting:'⏳',permission:'🔐',notification:'🔔',subagent:'🧩'};
+var KLABEL={done:'已完成',waiting:'等待输入',permission:'需要授权',notification:'通知',subagent:'子任务'};
+
+/* 解析某事件实际用的音色：项目覆盖 > 服务端分配 > 默认 */
+function resolveVoice(ev){ return VOVR[ev.projectKey] || ev.voice || CFG.defaultVoice; }
+
+/* =========================================================
+   hero + 循环提醒
+   ========================================================= */
+var activeEv=null, repeatTimer=null, titleTimer=null, baseTitle=document.title;
+function renderHero(ev){
+  var hero=document.getElementById('hero'); var c=colorOf(ev);
+  hero.style.setProperty('--c',c.accent);
+  hero.className='hero '+(ev.needsAction?'act':'');
+  document.getElementById('hpdot').style.opacity=1;
+  document.getElementById('hpname').textContent=ev.project;
+  var vt=document.getElementById('hvtag'); vt.style.display=''; vt.textContent=genderIcon(resolveVoice(ev))+' '+resolveVoice(ev);
+  var b=document.getElementById('hbadge'); b.style.display=''; b.className='badge '+ev.kind; b.textContent=KLABEL[ev.kind]||ev.kind;
+  document.getElementById('htitle').textContent=ev.title;
+  document.getElementById('hdetail').textContent=ev.detail||'';
+  document.getElementById('htime').textContent=fmtTime(ev.ts);
+  document.getElementById('hacts').style.display=ev.needsAction?'flex':'none';
+}
+function setActive(ev){
+  clearRepeat(); activeEv=ev; renderHero(ev);
+  if(ev.needsAction){
+    startTitleFlash(ev);
+    if(S.repeat) repeatTimer=setInterval(function(){ if(activeEv) speak(activeEv.speak, activeEv.kind, activeEv.style, resolveVoice(activeEv)); }, REPEAT_EVERY);
+  }
+}
+function clearRepeat(){ if(repeatTimer){clearInterval(repeatTimer); repeatTimer=null;} if(titleTimer){clearInterval(titleTimer); titleTimer=null; document.title=baseTitle;} }
+function acknowledge(){
+  activeEv=null; clearRepeat();
+  var hero=document.getElementById('hero'); hero.className='hero idle'; hero.style.removeProperty('--c');
+  document.getElementById('hpdot').style.opacity=.3;
+  document.getElementById('hpname').textContent='已确认';
+  document.getElementById('hvtag').style.display='none';
+  document.getElementById('hbadge').style.display='none';
+  document.getElementById('htitle').textContent='等待下一个信号…';
+  document.getElementById('hdetail').textContent='';
+  document.getElementById('htime').textContent='';
+  document.getElementById('hacts').style.display='none';
+}
+function startTitleFlash(ev){ if(titleTimer) clearInterval(titleTimer); var on=false;
+  titleTimer=setInterval(function(){ on=!on; document.title=on?('🔔 '+ev.project+' 需要你！'):baseTitle; },1000); }
+
+/* =========================================================
+   事件流
+   ========================================================= */
+function addToFeed(ev, hist){
+  var feed=document.getElementById('feed'); var em=feed.querySelector('.empty'); if(em) em.remove();
+  var c=colorOf(ev); var el=document.createElement('div');
+  el.className='item'+(hist?'':' rise'); el.style.setProperty('--c',c.accent); el.style.setProperty('--cbg',c.bg);
+  el.innerHTML='<div class="ic">'+(KICON[ev.kind]||'🔔')+'</div>'+
+    '<div class="body"><div class="l1">'+
+      '<span class="pn">'+esc(ev.project)+'</span>'+
+      '<span class="badge '+ev.kind+'">'+(KLABEL[ev.kind]||ev.kind)+'</span>'+
+      '<span class="gi">'+genderIcon(resolveVoice(ev))+' '+esc(resolveVoice(ev))+'</span>'+
+      '<span class="time">'+fmtTime(ev.ts)+'</span></div>'+
+      '<div class="dt">'+esc(ev.detail||ev.title)+'</div></div>'+
+    '<div class="pl">▶</div>';
+  el.onclick=function(){ speak(ev.speak, ev.kind, ev.style, resolveVoice(ev)); };
+  feed.insertBefore(el, feed.firstChild);
+  while(feed.children.length>FEED_MAX) feed.removeChild(feed.lastChild);
+}
+function trackProject(ev){
+  if(!SEEN[ev.projectKey]){ SEEN[ev.projectKey]={name:ev.project, color:colorOf(ev).accent, voice:ev.voice}; renderProjects(); }
+}
+function onEvent(ev){
+  trackProject(ev); addToFeed(ev,false);
+  if(ev.silent){ return; }   // 默认静音事件（如子任务完成）：只进列表，不播报、不弹窗、不占主信号台
+  setActive(ev);
+  speak(ev.speak, ev.kind, ev.style, resolveVoice(ev));
+  notify(ev);
+}
+function notify(ev){
+  if(!('Notification' in window) || Notification.permission!=='granted') return;
+  try{ new Notification(ev.project+' · '+(KLABEL[ev.kind]||''), {body:ev.detail||ev.title, tag:'cv', renotify:true}); }catch(e){}
+}
+
+/* =========================================================
+   音色中心
+   ========================================================= */
+function genderIcon(voiceName){ var g=null; for(var i=0;i<CFG.voicePool.length;i++) if(CFG.voicePool[i].name===voiceName) g=CFG.voicePool[i].gender; return g==='m'?'♂':(g==='f'?'♀':'·'); }
+function renderVoices(){
+  var g=document.getElementById('vgrid'); g.innerHTML='';
+  CFG.voicePool.forEach(function(v){
+    var d=document.createElement('div'); d.className='vchip';
+    d.innerHTML='<div class="g '+v.gender+'">'+(v.gender==='m'?'♂':'♀')+'</div>'+
+      '<div><div class="nm">'+esc(v.name)+'</div><div class="sub">'+(v.gender==='m'?'男声':'女声')+'</div></div>'+
+      '<div class="pl">▶</div>';
+    d.onclick=function(){ if(!audioReady) unlock();
+      speak('你好 '+CFG.userName+'，我是 '+v.name+'，以后这个项目就由我来播报。', 'notification', '语气自然亲切。', v.name, false); };
+    g.appendChild(d);
+  });
+}
+function renderProjects(){
+  var box=document.getElementById('plist'); var keys=Object.keys(SEEN);
+  if(!keys.length){ box.innerHTML='<div class="muted">出现过的项目会在这里列出，可单独换音色。</div>'; return; }
+  box.innerHTML='';
+  keys.forEach(function(k){
+    var p=SEEN[k]; var cur=VOVR[k]||p.voice||CFG.defaultVoice;
+    var row=document.createElement('div'); row.className='prow';
+    var opts=CFG.voicePool.map(function(v){ return '<option value="'+v.name+'"'+(v.name===cur?' selected':'')+'>'+(v.gender==='m'?'♂':'♀')+' '+v.name+'</option>'; }).join('');
+    row.innerHTML='<span class="pdot" style="background:'+p.color+';box-shadow:0 0 10px '+p.color+'"></span>'+
+      '<span class="nm">'+esc(p.name)+'</span>'+
+      '<select data-k="'+esc(k)+'">'+opts+'</select>';
+    var sel=row.querySelector('select');
+    sel.onchange=function(){ VOVR[k]=sel.value; saveVOVR();
+      if(!audioReady) unlock();
+      speak('你好 '+CFG.userName+'，'+p.name+' 以后用我的声音。', 'notification', '语气自然。', sel.value, false); };
+    box.appendChild(row);
+  });
+}
+
+/* =========================================================
+   SSE
+   ========================================================= */
+function connect(){
+  setConn(false,'连接中…');
+  var es=new EventSource(withTok('/events'));
+  es.onopen=function(){ setConn(true,'已连接'); };
+  es.onerror=function(){ setConn(false,'重连中…'); };
+  es.onmessage=function(e){ var m; try{m=JSON.parse(e.data);}catch(_){return;}
+    if(m.type==='history'){ (m.events||[]).forEach(function(ev){ trackProject(ev); addToFeed(ev,true); }); }
+    else if(m.type==='event'){ onEvent(m.event); } };
+}
+function setConn(ok,txt){ var d=document.getElementById('connDot'); d.className='dot '+(ok?'on':'off'); document.getElementById('connTxt').textContent=txt; }
+
+/* =========================================================
+   控件
+   ========================================================= */
+document.getElementById('enableBtn').onclick=function(){
+  unlock(); document.getElementById('gate').classList.add('hidden');
+  if('Notification' in window && Notification.permission==='default') Notification.requestPermission();
+  speak('语音信号台已就绪，'+CFG.userName+'。', 'done', '语气沉稳。', CFG.defaultVoice);
+};
+var muteBtn=document.getElementById('muteBtn');
+function paintMute(){ muteBtn.textContent=S.muted?'🔕 语音关':'🔔 语音开'; muteBtn.className='btn '+(S.muted?'off':'on'); }
+muteBtn.onclick=function(){ S.muted=!S.muted; saveS(); paintMute(); if(S.muted) queue.length=0; };
+paintMute();
+var repeatBtn=document.getElementById('repeatBtn');
+function paintRepeat(){ repeatBtn.textContent=S.repeat?'🔁 循环提醒开':'➡ 循环提醒关'; repeatBtn.className='btn '+(S.repeat?'on':'off'); }
+repeatBtn.onclick=function(){ S.repeat=!S.repeat; saveS(); paintRepeat(); if(!S.repeat) clearRepeat(); else if(activeEv&&activeEv.needsAction) setActive(activeEv); };
+paintRepeat();
+var volRange=document.getElementById('volRange');
+volRange.value=Math.round((S.volume||1)*100);
+volRange.oninput=function(){ S.volume=(+volRange.value)/100; saveS(); if(masterGain){ try{ masterGain.gain.value=S.volume; }catch(e){} } };
+document.getElementById('testBtn').onclick=function(){ if(!audioReady) unlock();
+  var demo={id:'t',ts:Date.now(),kind:'permission',needsAction:true,project:'示例项目',projectKey:'__demo__',
+    title:'需要你的授权',detail:'Claude 需要你授权使用 Write（这是一条测试）。',
+    speak:CFG.userName+'，示例项目 想用 Write，等你点头。', style:'语气自然。',
+    voice:CFG.defaultVoice, gender:genderIcon(CFG.defaultVoice)};
+  onEvent(demo); };
+document.getElementById('ackBtn').onclick=acknowledge;
+document.getElementById('replayBtn').onclick=function(){ if(activeEv) speak(activeEv.speak, activeEv.kind, activeEv.style, resolveVoice(activeEv)); };
+document.getElementById('clearBtn').onclick=function(){ document.getElementById('feed').innerHTML='<div class="empty">还没有信号。</div>'; };
+document.getElementById('pushBtn').onclick=enablePush;
+document.addEventListener('visibilitychange', function(){ if(!document.hidden && activeEv && activeEv.needsAction && !S.muted) speak(activeEv.speak, activeEv.kind, activeEv.style, resolveVoice(activeEv)); });
+
+/* ---------- PWA + Web Push（仅在 Worker 部署且配了 VAPID 时启用）---------- */
+var swReg=null;
+function registerSW(){
+  if(!('serviceWorker' in navigator)) return Promise.resolve(null);
+  return navigator.serviceWorker.register('sw.js').then(function(r){ swReg=r; return r; }).catch(function(){ return null; });
+}
+function urlB64(s){ s=String(s).replace(/-/g,'+').replace(/_/g,'/'); s+='='.repeat((4-s.length%4)%4);
+  var raw=atob(s), a=new Uint8Array(raw.length); for(var i=0;i<raw.length;i++) a[i]=raw.charCodeAt(i); return a; }
+function idbPut(k,v){ try{ var rq=indexedDB.open('cv',1);
+  rq.onupgradeneeded=function(){ rq.result.createObjectStore('kv'); };
+  rq.onsuccess=function(){ try{ rq.result.transaction('kv','readwrite').objectStore('kv').put(v,k); }catch(e){} }; }catch(e){} }
+function isStandalone(){ return (window.navigator.standalone===true) || (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches); }
+function isiOS(){ return /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform==='MacIntel' && navigator.maxTouchPoints>1); }
+function enablePush(){
+  if(!CFG.vapidPublic){ alert('当前服务端未开启推送（需 Cloudflare Worker + VAPID）。'); return; }
+  // iOS 限制：普通 Safari 标签页没有 Notification/推送，必须先「添加到主屏幕」再从主屏幕打开
+  if(!('Notification' in window) || ('PushManager' in window)===false || (isiOS() && !isStandalone())){
+    alert('iPhone 需要先把本页“添加到主屏幕”，再从主屏幕图标打开本应用，才能开启推送。\n\n这是 iOS 的限制：普通 Safari 标签页不支持网页推送。\n\n步骤：\n① 点 Safari 底部中间的「分享」按钮（方框+向上箭头）\n② 选「添加到主屏幕」\n③ 回到主屏幕，打开 ClaudeVoice 图标\n④ 再点“开启手机推送”，弹出时选“允许”');
+    return;
+  }
+  registerSW().then(function(reg){
+    return reg || navigator.serviceWorker.ready;
+  }).then(function(reg){
+    return Notification.requestPermission().then(function(p){ if(p!=='granted') throw new Error('未授权通知'); return reg; });
+  }).then(function(reg){
+    return reg.pushManager.getSubscription().then(function(s){
+      return s || reg.pushManager.subscribe({userVisibleOnly:true, applicationServerKey:urlB64(CFG.vapidPublic)});
+    });
+  }).then(function(sub){
+    idbPut('token', TOKEN);
+    return fetch(withTok('/subscribe'),{method:'POST',headers:{'Content-Type':'application/json','X-CV-Token':TOKEN},body:JSON.stringify(sub)});
+  }).then(function(){ var b=document.getElementById('pushBtn'); b.textContent='📱 手机推送已开'; b.className='btn on'; })
+   .catch(function(e){ console.warn('开启推送失败',e); alert('开启推送失败：'+(e&&e.message||e)); });
+}
+
+/* ---------- 工具 ---------- */
+function fmtTime(ts){ return new Date(ts).toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit',second:'2-digit'}); }
+function esc(s){ return (s||'').toString().replace(/[&<>"]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];}); }
+
+/* ---------- 星场 ---------- */
+(function starfield(){
+  if(window.matchMedia && window.matchMedia('(prefers-reduced-motion:reduce)').matches) return;
+  var cv=document.getElementById('starfield'), ctx=cv.getContext('2d'), stars=[], W,H,DPR=Math.min(2,window.devicePixelRatio||1);
+  function resize(){ W=cv.width=innerWidth*DPR; H=cv.height=innerHeight*DPR; cv.style.width=innerWidth+'px'; cv.style.height=innerHeight+'px';
+    stars=[]; var n=Math.min(150,Math.floor(innerWidth*innerHeight/12000));
+    for(var i=0;i<n;i++) stars.push({x:Math.random()*W,y:Math.random()*H,z:Math.random()*.8+.2,p:Math.random()*Math.PI*2}); }
+  resize(); addEventListener('resize',resize);
+  (function loop(){
+    ctx.clearRect(0,0,W,H);
+    for(var i=0;i<stars.length;i++){ var s=stars[i]; s.y+=s.z*.12*DPR; s.p+=.02; if(s.y>H) s.y=0;
+      var tw=.4+.6*Math.abs(Math.sin(s.p)); ctx.globalAlpha=tw*s.z*0.42;
+      ctx.fillStyle= i%9===0 ? '#8da0c8' : '#aeb8d0';
+      var r=s.z*1.4*DPR; ctx.beginPath(); ctx.arc(s.x,s.y,r,0,6.283); ctx.fill(); }
+    ctx.globalAlpha=1; requestAnimationFrame(loop);
+  })();
+})();
+
+/* ---------- 启动：拉取 config 后初始化 ---------- */
+function showIosHint(){
+  if(!isiOS() || isStandalone() || document.getElementById('iosHint')) return;
+  var b=document.createElement('div'); b.id='iosHint';
+  b.style.cssText='margin:0 0 18px;padding:12px 16px;border-radius:12px;border:1px solid var(--line);background:rgba(99,102,241,.09);color:var(--ink);font-size:13px;line-height:1.7;';
+  b.innerHTML='📲 <b>iPhone 收手机推送要先装到主屏幕</b>：点 Safari 底部中间「分享」按钮 →「添加到主屏幕」，再从主屏幕图标打开本应用，才能开启推送（这是 iOS 的限制，普通标签页不支持）。语音播报在标签页里就能用。';
+  var wrap=document.querySelector('.wrap'), controls=document.querySelector('.controls');
+  if(wrap&&controls) wrap.insertBefore(b, controls.nextSibling);
+}
+fetch(withTok('/config')).then(function(r){return r.json();}).then(function(c){
+  if(c.voicePool && c.voicePool.length) CFG.voicePool=c.voicePool;
+  if(c.userName){ CFG.userName=c.userName; document.getElementById('userName').textContent=c.userName; }
+  if(c.defaultVoice) CFG.defaultVoice=c.defaultVoice;
+  if(c.vapidPublic){ CFG.vapidPublic=c.vapidPublic; document.getElementById('pushBtn').style.display=''; registerSW(); }
+}).catch(function(){}).finally(function(){ renderVoices(); renderProjects(); connect(); showIosHint(); });
+
+})();
+</script>
+</body>
+</html>
