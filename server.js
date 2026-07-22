@@ -38,6 +38,7 @@ const CFG = {
   hookSecret: process.env.HOOK_SECRET || '',
   dashToken: process.env.DASH_TOKEN || '', // 设了就要求 ?token= 才能看面板/SSE/TTS
   userName: process.env.USER_NAME || 'Dev', // 播报时尊称
+  userAliases: String(process.env.USER_ALIASES || '').split(/[，,]/).map(s => s.trim()).filter(Boolean), // 备用称呼，随机轮换
   larkWebhook: process.env.LARK_WEBHOOK_URL || '',    // 飞书自定义机器人 webhook（备选）
   larkSecret: process.env.LARK_WEBHOOK_SECRET || '',  // 可选签名密钥
   larkAppId: process.env.LARK_APP_ID || '',           // 飞书自建应用（机器人私信）
@@ -62,6 +63,11 @@ const HONORIFICS = [
   '一把手', '董事长', '总裁', '掌柜的', '东家',
   '当家的', '当家人', '我们老大', '我的顶头上司', '话事人',
 ];
+
+// 用户认可的几种称呼：主名 userName + 备用别名 userAliases，每次随机抽一个当开头。
+function userAddresses() {
+  return [CFG.userName, ...CFG.userAliases];
+}
 
 const PROJECTS = loadProjects(path.join(__dirname, 'projects.json'));
 
@@ -233,7 +239,7 @@ function assignVoice(projectKey, override) {
 // 统一格式：中文名 + 敬称 + 目录名 + 任务状态 + 具体描述
 function buildSpeak(kind, U, proj, tool, detail) {
   if (kind === 'done') return buildDoneSpeak(U, proj, detail);
-  const g = `${U}，${pick(HONORIFICS)}，`;
+  const g = `${pick(userAddresses())}，${pick(HONORIFICS)}，`;
   const P = {
     waiting: [
       `${g}目录 ${proj} 正在等你输入，回去看一下吧。`,
@@ -257,7 +263,7 @@ function isMostlyChinese(s) {
   return cjk >= Math.max(4, latin);
 }
 function buildDoneSpeak(U, proj, detail) {
-  const g = `${U}，${pick(HONORIFICS)}，`;
+  const g = `${pick(userAddresses())}，${pick(HONORIFICS)}，`;
   const text = detail || '';
   const sum = (text && text !== '本轮任务结束。' && isMostlyChinese(text)) ? pickSummary(text, 150) : '';
   if (!sum || detail === '本轮任务结束。') {

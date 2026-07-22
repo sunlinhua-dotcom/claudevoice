@@ -18,7 +18,7 @@ function idbGet(k){
   });
 }
 
-var LAB={done:'已完成',waiting:'等待输入',permission:'需要授权',notification:'通知',subagent:'子任务'};
+var LAB={done:'已完成',waiting:'等待输入',permission:'需要授权',notification:'通知',subagent:'子任务',failed:'任务失败'};
 
 self.addEventListener('push', function(e){
   e.waitUntil((async function(){

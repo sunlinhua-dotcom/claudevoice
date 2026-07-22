@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "images": {
+    "running": {
+      "file": "banners/running.png",
+      "sha256": "a4538678f5e4c1dbcc858052f7c101c316580e7a6aa7115155b0115c5a3da5f5",
+      "image_key": "img_v3_0213m_76687d64-8764-4a2a-81e9-13bdc13865bg"
+    },
+    "permission": {
+      "file": "banners/permission.png",
+      "sha256": "00795c2e2e4b14ff9b9f84be6e3694f59cebac90b2e79707e6979823e6003cf6",
+      "image_key": "img_v3_0213m_8ced2bae-3270-4c01-a5ea-49bad6299d5g"
+    },
+    "failed": {
+      "file": "banners/failed.png",
+      "sha256": "95b5d081573bee5c24969ff65c428b48924eb2ee24011e2facd90781282ef6ce",
+      "image_key": "img_v3_0213m_cabf7555-9a31-4b33-8382-cf95969d49ag"
+    },
+    "queued": {
+      "file": "banners/queued.png",
+      "sha256": "ec749b421820f328403854e5ac466bfd03ef9cff90a462b391a2da8e0c78690c",
+      "image_key": "img_v3_0213m_619edcf6-b414-4c0d-9ae3-84492c0de16g"
+    },
+    "voice": {
+      "file": "banners/voice.png",
+      "sha256": "a658142b079f9178efa8e7bab4a0cbeb7cfe18317067e2a501e2cabb505e9baf",
+      "image_key": "img_v3_0213m_bc8c2271-e00e-4bb0-8666-d6b03d9c312g"
+    },
+    "help": {
+      "file": "banners/help.png",
+      "sha256": "6b5cd55276099d7f1ada22bc22aabd807a60f01e0b666708998f9e519c1ff046",
+      "image_key": "img_v3_0213m_59e90b01-0e15-4f60-8432-895e431f7a7g"
+    },
+    "done": {
+      "file": "banners/done.png",
+      "sha256": "1c56d764ac920485c6ce2180656c3b7f47a4e20e309e6dde7e10fd7a77226017",
+      "image_key": "img_v3_0213m_7044ce3f-ac75-4eb2-a30b-d6ed28768d1g"
+    }
+  },
+  "updatedAt": "2026-07-16T20:40:32.972Z"
+}

@@ -3,21 +3,21 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-<meta name="theme-color" content="#04060d">
+<meta name="theme-color" content="#faf6f0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
 <link rel="manifest" href="manifest.webmanifest">
-<!-- 图标/分享卡片：用绝对地址 PNG，微信与 iOS 主屏幕才能正确识别（SVG 不被识别）-->
-<link rel="apple-touch-icon" href="https://claudevoice.sunlinhua.workers.dev/assets/apple-touch-icon.png">
-<link rel="icon" type="image/png" sizes="192x192" href="https://claudevoice.sunlinhua.workers.dev/assets/icon-192.png">
+<!-- 图标/分享卡片：同源相对路径，Worker 从 /assets/ 提供，部署到任何子域都自适应 -->
+<link rel="apple-touch-icon" href="/assets/apple-touch-icon.png">
+<link rel="icon" type="image/png" sizes="192x192" href="/assets/icon-192.png">
 <meta property="og:type" content="website">
-<meta property="og:title" content="ClaudeVoice 语音信号台">
-<meta property="og:description" content="Claude Code 全局语音通知台：任务完成 / 需要你确认时，自动语音播报 + 飞书卡片 + 手机推送。">
-<meta property="og:image" content="https://claudevoice.sunlinhua.workers.dev/assets/icon-512.png">
-<meta property="og:url" content="https://claudevoice.sunlinhua.workers.dev/">
+<meta property="og:title" content="ClaudeVoice 指挥台驾驶舱">
+<meta property="og:description" content="Claude Code 指挥台：任务、审批与完成信号实时汇入晨光星图驾驶舱。">
+<meta property="og:image" content="/assets/icon-512.png">
+<meta property="og:url" content="/">
 <meta name="twitter:card" content="summary">
-<meta name="twitter:image" content="https://claudevoice.sunlinhua.workers.dev/assets/icon-512.png">
-<title>ClaudeVoice · 语音信号台</title>
+<meta name="twitter:image" content="/assets/icon-512.png">
+<title>ClaudeVoice · 指挥台驾驶舱</title>
 <style>
 /* ============================================================
    ClaudeVoice — "语音信号台"
@@ -206,7 +206,7 @@ h1,h2,h3,h4,p,.lead{word-break:keep-all; overflow-wrap:break-word; text-wrap:bal
   --line:#e3e7f1; --glass:rgba(255,255,255,.72); --glass2:rgba(255,255,255,.55);
   --accent:#6366f1; --good:#12b886; --warn:#e0890b; --hot:#ef4476;
 }
-body{ background:#eef1f8 url('assets/cv-bg-light.png') center/cover no-repeat fixed; }
+body{ background:#faf6f0 url('assets/panel-bg.jpg') center/cover no-repeat fixed; font-family:"Avenir Next","PingFang SC","Hiragino Sans GB",system-ui,-apple-system,sans-serif; }
 body::before{
   background:
     radial-gradient(900px 520px at 80% -10%, rgba(140,130,255,.12), transparent 60%),
@@ -231,6 +231,7 @@ body::before{
 .badge.permission{ background:rgba(239,68,118,.14); color:#d61f57; }
 .badge.notification{ background:rgba(99,102,241,.14); color:#4f46e5; }
 .badge.subagent{ background:rgba(139,92,246,.14); color:#7c3aed; }
+.badge.failed{ background:rgba(164,58,54,.14); color:#a43a36; }
 .panel{ background:var(--glass); border:1px solid var(--line); }
 .vchip{ background:rgba(255,255,255,.62); border:1px solid var(--line); }
 .vchip:hover{ background:#fff; border-color:var(--accent); }
@@ -246,6 +247,55 @@ body::before{
 .hero,.panel{ box-shadow:0 1px 0 rgba(255,255,255,.9) inset, 0 22px 50px -30px rgba(30,40,80,.3); }
 .item{ box-shadow:0 1px 0 rgba(255,255,255,.9) inset, 0 10px 26px -22px rgba(30,40,80,.28); }
 .hero,.item,.panel{ backdrop-filter:blur(14px) saturate(1.2); -webkit-backdrop-filter:blur(14px) saturate(1.2); }
+
+/* ===================== UI 2.0 · 晨光星图指挥台 ===================== */
+:root{
+  --bg:#faf6f0; --ink:#263039; --dim:#68727a; --dim2:#9a9f9d;
+  --line:rgba(95,112,110,.16); --glass:rgba(255,252,247,.78);
+  --accent:#607d94; --good:#71836a; --warn:#d88445; --hot:#a9473f;
+}
+#starfield{opacity:.15; mix-blend-mode:multiply;}
+body::before{background:linear-gradient(180deg,rgba(250,246,240,.16),rgba(250,246,240,.34));}
+.top{background:linear-gradient(180deg,rgba(250,246,240,.94),rgba(250,246,240,.7) 76%,transparent);border-bottom:1px solid rgba(96,112,108,.12);}
+.logo{font-family:"Songti SC","STSong",serif; font-size:20px; font-weight:700; color:#34434a;}
+.logo small{font-family:"Avenir Next","PingFang SC",sans-serif; letter-spacing:.08em;}
+.orbit::before{background:radial-gradient(circle at 45% 42%,#fff,#aebba2 42%,#75866f 68%,transparent 72%);box-shadow:0 0 18px rgba(113,131,106,.35);}
+.orbit::after{border-color:rgba(239,125,83,.55);border-top-color:transparent;border-bottom-color:transparent;}
+.wrap{max-width:1080px;padding-top:16px;}
+.controls{margin-bottom:18px;}
+.btn.primary{background:#667f91;box-shadow:0 10px 24px -14px rgba(63,84,99,.55);}
+
+.command-deck{position:relative;overflow:hidden;margin-bottom:22px;padding:22px;border:1px solid rgba(97,116,112,.18);border-radius:24px;background:rgba(255,252,247,.82);box-shadow:0 24px 64px -42px rgba(72,82,76,.5),inset 0 1px 0 rgba(255,255,255,.96);backdrop-filter:blur(18px) saturate(1.08);}
+.command-deck::after{content:"";position:absolute;inset:0;pointer-events:none;background:linear-gradient(110deg,rgba(240,132,91,.08),transparent 36%,rgba(112,132,111,.06));}
+.deck-head{position:relative;z-index:1;display:flex;align-items:center;gap:13px;margin-bottom:16px;}
+.deck-mark{width:42px;height:42px;border-radius:14px;overflow:hidden;border:1px solid rgba(94,112,110,.14);box-shadow:0 10px 24px -16px rgba(63,79,74,.45);flex:none;}
+.deck-mark img{width:100%;height:100%;object-fit:cover;display:block;}
+.deck-title{min-width:0;}
+.deck-title h2{font-family:"Songti SC","STSong",serif;font-size:22px;line-height:1.15;margin:0;color:#34434a;letter-spacing:.04em;}
+.deck-title p{font-size:12px;color:var(--dim);margin:3px 0 0;letter-spacing:.08em;}
+.deck-live{margin-left:auto;display:inline-flex;align-items:center;gap:7px;padding:5px 10px;border-radius:999px;background:rgba(113,131,106,.11);color:#62735c;font-size:11px;font-weight:700;white-space:nowrap;}
+.deck-live::before{content:"";width:6px;height:6px;border-radius:50%;background:#71836a;box-shadow:0 0 0 4px rgba(113,131,106,.12);}
+.bridge-stream{position:relative;z-index:1;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;}
+.bridge-event{display:grid;grid-template-columns:42px minmax(0,1fr) auto;gap:12px;align-items:center;padding:13px;border:1px solid rgba(93,111,107,.13);border-radius:16px;background:rgba(255,255,255,.58);transition:transform .18s var(--ease),box-shadow .18s var(--ease),border-color .18s var(--ease);}
+.bridge-event:hover{transform:translateY(-2px);border-color:rgba(96,125,148,.28);box-shadow:0 16px 30px -24px rgba(55,70,68,.48);}
+.bridge-event.rise{animation:rise var(--fade-rise) var(--ease);}
+.bridge-event.permission{border-color:rgba(206,102,64,.34);background:linear-gradient(135deg,rgba(255,247,240,.92),rgba(255,255,255,.62));box-shadow:inset 3px 0 0 #d16f49;}
+.bridge-event.failed{border-color:rgba(164,71,63,.28);box-shadow:inset 3px 0 0 #a9473f;}
+.bridge-icon{width:42px;height:42px;border-radius:13px;overflow:hidden;background:#faf6f0;border:1px solid rgba(91,108,105,.12);}
+.bridge-icon img{display:block;width:100%;height:100%;object-fit:cover;}
+.bridge-copy{min-width:0;}
+.bridge-meta{display:flex;align-items:center;gap:8px;min-width:0;margin-bottom:2px;}
+.bridge-project{font-weight:700;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.bridge-kind{font-size:10px;padding:2px 7px;border-radius:999px;background:rgba(96,125,148,.1);color:#526d80;white-space:nowrap;}
+.bridge-event.permission .bridge-kind{background:rgba(209,111,73,.13);color:#b35435;}
+.bridge-event.failed .bridge-kind{background:rgba(169,71,63,.12);color:#983d36;}
+.bridge-detail{font-size:12px;color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.bridge-time{font-size:11px;color:var(--dim2);white-space:nowrap;font-variant-numeric:tabular-nums;}
+.bridge-empty{grid-column:1/-1;padding:21px;border:1px dashed rgba(96,112,108,.18);border-radius:15px;text-align:center;color:var(--dim2);font-size:13px;background:rgba(255,255,255,.3);}
+.hero,.panel,.item{background:rgba(255,252,247,.72);border-color:rgba(96,112,108,.14);}
+.feed h3,.panel h4{color:#7e8582;}
+@media(max-width:720px){.bridge-stream{grid-template-columns:1fr}.bridge-event{grid-template-columns:40px minmax(0,1fr) auto}.deck-title p{display:none}}
+@media(max-width:560px){.command-deck{padding:17px;border-radius:20px}.deck-title h2{font-size:19px}.deck-live{padding:4px 8px}.bridge-time{display:none}}
 </style>
 </head>
 <body>
@@ -255,14 +305,14 @@ body::before{
 <div class="gate" id="gate">
   <div class="inner">
     <div class="bigmark"></div>
-    <h2>开启语音信号台</h2>
+    <h2>开启指挥台驾驶舱</h2>
     <p>浏览器需要一次点击才能自动播放声音。点开后保持此页打开，所有项目的提醒都会带音效自动播报。</p>
     <button class="btn primary" id="enableBtn" style="font-size:15px; padding:13px 26px;">点击启用语音播报</button>
   </div>
 </div>
 
 <div class="top">
-  <div class="logo"><span class="orbit"></span>ClaudeVoice <small>语音信号台</small></div>
+  <div class="logo"><span class="orbit"></span>ClaudeVoice <small>指挥台驾驶舱</small></div>
   <div class="spacer"></div>
   <div class="hi">欢迎回来，<b id="userName">Dev</b></div>
   <div class="conn"><span class="dot" id="connDot"></span><span id="connTxt">连接中…</span></div>
@@ -277,6 +327,15 @@ body::before{
     <button class="btn" id="pushBtn" style="display:none">📱 开启手机推送</button>
     <button class="btn" id="clearBtn">清空记录</button>
   </div>
+
+  <section class="command-deck" aria-labelledby="deckTitle">
+    <div class="deck-head">
+      <div class="deck-mark"><img src="assets/icons/compass.png" alt=""></div>
+      <div class="deck-title"><h2 id="deckTitle">指挥台</h2><p>CLAUDE CODE · BRIDGE MISSION STREAM</p></div>
+      <span class="deck-live">实时联机</span>
+    </div>
+    <div class="bridge-stream" id="bridgeFeed"><div class="bridge-empty">等待 cc-bridge 的第一条任务信号。</div></div>
+  </section>
 
   <div class="hero idle" id="hero">
     <div class="sonar"><i></i><i></i><i></i></div>
@@ -395,7 +454,7 @@ function playCue(kind){
   if(!audioCtx) return 0;
   ensureGraph();
   var t=audioCtx.currentTime;
-  var needs=(kind==='waiting'||kind==='permission');
+  var needs=(kind==='waiting'||kind==='permission'||kind==='failed');
   var dur=needs?4.2:3.4;                       // 更长
 
   var dry=audioCtx.createGain(); dry.gain.value=1.0; dry.connect(masterGain);
@@ -582,8 +641,9 @@ function colorOf(ev){
   var h=hueOf(ev.projectKey||ev.project||'x');
   return {accent:'hsl('+h+',75%,66%)', bg:'hsla('+h+',75%,60%,.16)'};
 }
-var KICON={done:'✅',waiting:'⏳',permission:'🔐',notification:'🔔',subagent:'🧩'};
-var KLABEL={done:'已完成',waiting:'等待输入',permission:'需要授权',notification:'通知',subagent:'子任务'};
+var KICON={done:'✅',waiting:'⏳',permission:'🔐',notification:'🔔',subagent:'🧩',failed:'✦'};
+var KLABEL={done:'已完成',waiting:'等待输入',permission:'需要授权',notification:'通知',subagent:'子任务',failed:'任务失败'};
+var BICON={notification:'rocket',done:'check',permission:'key',failed:'bolt',waiting:'hourglass',subagent:'planet',voice:'wave',project:'folder'};
 
 /* 解析某事件实际用的音色：项目覆盖 > 服务端分配 > 默认 */
 function resolveVoice(ev){ return VOVR[ev.projectKey] || ev.voice || CFG.defaultVoice; }
@@ -647,11 +707,25 @@ function addToFeed(ev, hist){
   feed.insertBefore(el, feed.firstChild);
   while(feed.children.length>FEED_MAX) feed.removeChild(feed.lastChild);
 }
+function addToBridge(ev, hist){
+  var feed=document.getElementById('bridgeFeed'); var em=feed.querySelector('.bridge-empty'); if(em) em.remove();
+  var el=document.createElement('article');
+  el.className='bridge-event '+ev.kind+(hist?'':' rise');
+  var icon=BICON[ev.kind]||'compass';
+  el.innerHTML='<div class="bridge-icon"><img src="assets/icons/'+icon+'.png" alt=""></div>'+
+    '<div class="bridge-copy"><div class="bridge-meta">'+
+      '<span class="bridge-project">'+esc(ev.project)+'</span>'+
+      '<span class="bridge-kind">'+esc(KLABEL[ev.kind]||ev.kind)+'</span></div>'+
+      '<div class="bridge-detail">'+esc(ev.title+(ev.detail?' · '+ev.detail:''))+'</div></div>'+
+    '<time class="bridge-time">'+fmtTime(ev.ts)+'</time>';
+  feed.insertBefore(el,feed.firstChild);
+  while(feed.children.length>8) feed.removeChild(feed.lastChild);
+}
 function trackProject(ev){
   if(!SEEN[ev.projectKey]){ SEEN[ev.projectKey]={name:ev.project, color:colorOf(ev).accent, voice:ev.voice}; renderProjects(); }
 }
 function onEvent(ev){
-  trackProject(ev); addToFeed(ev,false);
+  trackProject(ev); if(ev.source==='bridge') addToBridge(ev,false); else addToFeed(ev,false);
   if(ev.silent){ return; }   // 默认静音事件（如子任务完成）：只进列表，不播报、不弹窗、不占主信号台
   setActive(ev);
   speak(ev.speak, ev.kind, ev.style, resolveVoice(ev));
@@ -706,7 +780,7 @@ function connect(){
   es.onopen=function(){ setConn(true,'已连接'); };
   es.onerror=function(){ setConn(false,'重连中…'); };
   es.onmessage=function(e){ var m; try{m=JSON.parse(e.data);}catch(_){return;}
-    if(m.type==='history'){ (m.events||[]).forEach(function(ev){ trackProject(ev); addToFeed(ev,true); }); }
+    if(m.type==='history'){ (m.events||[]).forEach(function(ev){ trackProject(ev); if(ev.source==='bridge') addToBridge(ev,true); else addToFeed(ev,true); }); }
     else if(m.type==='event'){ onEvent(m.event); } };
 }
 function setConn(ok,txt){ var d=document.getElementById('connDot'); d.className='dot '+(ok?'on':'off'); document.getElementById('connTxt').textContent=txt; }
@@ -717,7 +791,7 @@ function setConn(ok,txt){ var d=document.getElementById('connDot'); d.className=
 document.getElementById('enableBtn').onclick=function(){
   unlock(); document.getElementById('gate').classList.add('hidden');
   if('Notification' in window && Notification.permission==='default') Notification.requestPermission();
-  speak('语音信号台已就绪，'+CFG.userName+'。', 'done', '语气沉稳。', CFG.defaultVoice);
+  speak('指挥台已就绪，'+CFG.userName+'。', 'done', '语气沉稳。', CFG.defaultVoice);
 };
 var muteBtn=document.getElementById('muteBtn');
 function paintMute(){ muteBtn.textContent=S.muted?'🔕 语音关':'🔔 语音开'; muteBtn.className='btn '+(S.muted?'off':'on'); }

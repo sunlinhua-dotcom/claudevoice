@@ -1,5 +1,7 @@
 import Cocoa
 import ServiceManagement
+import ApplicationServices
+import QuartzCore
 import Darwin
 
 func appLog(_ s: String) {
@@ -108,15 +110,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var watcher: QueueWatcher!
     let cfg = appConfig()
     var recent: [[String: Any]] = []
+    private let relayClient = RelayClient()
+    private let injector = TextInjector()
+    private let defaults = UserDefaults.standard
+    private var llmOn = true
+    private var pairingWC: PairingWindowController?
+    private var pulsing = false
+    private var remoteConnectionTitle = "状态：未连接"
+    private var remotePeerTitle = "对端：等待手机"
+    private var pairedDeviceCount = 0
+    private var lastInjectedText = "——"
+    private var relayUrl: String {
+        get { RelayClient.resolveRelayURL(defaults.string(forKey: "relayUrl")) }
+        set { defaults.set(newValue, forKey: "relayUrl") }
+    }
 
     func applicationDidFinishLaunching(_ n: Notification) {
         appLog("launched. base=\(cfg.base) tokenLen=\(cfg.token.count)")
+        migrateRemoteVoiceDefaultsIfNeeded()
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        if let btn = statusItem.button {
-            if let img = NSImage(contentsOfFile: resPath("menubar.png")) {
-                img.size = NSSize(width: 18, height: 18); img.isTemplate = true; btn.image = img
-            } else { btn.title = "◑" }
-        }
+        statusItem.button?.imagePosition = .imageOnly
+        statusItem.button?.toolTip = "ClaudeVoice"
+        setSaturnIcon()
         let menu = NSMenu(); menu.delegate = self
         statusItem.menu = menu
 
@@ -133,6 +148,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self.player.enqueue(ev, delete: path)
         }
         watcher.start()
+        setupRemoteInput()
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        appLog("terminating")
+        relayClient.disconnect()
+        DictationHUD.shared.teardown()
+        watcher?.timer?.invalidate()
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        return true
     }
 
     func recordRecent(_ ev: [String: Any]) {
@@ -142,6 +169,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func hhmm(_ ev: [String: Any]) -> String {
         guard let ts = ev["ts"] as? Double else { return "" }
         let f = DateFormatter(); f.dateFormat = "HH:mm"; return f.string(from: Date(timeIntervalSince1970: ts / 1000))
+    }
+
+    func setSaturnIcon() {
+        guard let btn = statusItem?.button else { return }
+        stopPulse()
+        btn.contentTintColor = nil
+        if let img = NSImage(contentsOfFile: resPath("menubar.png")) {
+            img.size = NSSize(width: 18, height: 18)
+            img.isTemplate = true
+            btn.image = img
+            btn.title = ""
+        } else {
+            btn.image = nil
+            btn.title = "◑"
+        }
+    }
+
+    func setRecordingIcon() {
+        guard let btn = statusItem?.button else { return }
+        let cfg = NSImage.SymbolConfiguration(pointSize: 16, weight: .medium)
+        let img = NSImage(systemSymbolName: "mic.fill", accessibilityDescription: "Listening")?
+            .withSymbolConfiguration(cfg)
+        img?.isTemplate = false
+        btn.title = ""
+        btn.image = img
+        btn.contentTintColor = .systemRed
+        startPulse()
+    }
+
+    func startPulse() {
+        guard !pulsing, let btn = statusItem?.button else { return }
+        pulsing = true
+        btn.wantsLayer = true
+        let anim = CABasicAnimation(keyPath: "opacity")
+        anim.fromValue = 1.0
+        anim.toValue = 0.35
+        anim.duration = 0.7
+        anim.autoreverses = true
+        anim.repeatCount = .infinity
+        anim.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        btn.layer?.add(anim, forKey: "recordingPulse")
+    }
+
+    func stopPulse() {
+        pulsing = false
+        statusItem?.button?.layer?.removeAnimation(forKey: "recordingPulse")
     }
 
     // 每次打开菜单时重建，展示最近播报
@@ -173,6 +246,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let panel = NSMenuItem(title: "🖥 打开网页面板", action: #selector(openPanel), keyEquivalent: ""); panel.target = self; menu.addItem(panel)
         let login = NSMenuItem(title: loginOn() ? "🚀 开机自启 ✓" : "🚀 开机自启", action: #selector(toggleLogin), keyEquivalent: ""); login.target = self; menu.addItem(login)
         menu.addItem(.separator())
+
+        let remoteHeader = NSMenuItem(title: "", action: nil, keyEquivalent: ""); remoteHeader.isEnabled = false
+        remoteHeader.attributedTitle = NSAttributedString(string: "远程输入", attributes: [.font: NSFont.systemFont(ofSize: 11, weight: .semibold), .foregroundColor: NSColor.tertiaryLabelColor])
+        menu.addItem(remoteHeader)
+        let conn = NSMenuItem(title: remoteConnectionTitle, action: nil, keyEquivalent: ""); conn.isEnabled = false; menu.addItem(conn)
+        let peer = NSMenuItem(title: remotePeerTitle, action: nil, keyEquivalent: ""); peer.isEnabled = false; menu.addItem(peer)
+        let pairing = NSMenuItem(title: "配对 / 设备…", action: #selector(openPairing), keyEquivalent: ""); pairing.target = self; menu.addItem(pairing)
+        let devices = NSMenuItem(title: "已配对设备：\(pairedDeviceCount)", action: nil, keyEquivalent: ""); devices.isEnabled = false; menu.addItem(devices)
+        let last = NSMenuItem(title: "最近注入：\(shortMenuText(lastInjectedText, limit: 42))", action: nil, keyEquivalent: ""); last.isEnabled = false; menu.addItem(last)
+        let llm = NSMenuItem(title: "标点纠错：\(llmOn ? "开" : "关")", action: #selector(toggleLlm), keyEquivalent: ""); llm.target = self; menu.addItem(llm)
+        let relay = NSMenuItem(title: "服务器地址：\(relayUrl)", action: #selector(editRelay), keyEquivalent: ""); relay.target = self; menu.addItem(relay)
+        let reconnect = NSMenuItem(title: "重新连接", action: #selector(reconnectRelay), keyEquivalent: "r"); reconnect.target = self; menu.addItem(reconnect)
+        menu.addItem(.separator())
+
         let quit = NSMenuItem(title: "退出 ClaudeVoice", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"); menu.addItem(quit)
     }
 
@@ -199,7 +286,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
     @objc func toggleMute() { player.muted.toggle() }
     @objc func testSpeak() {
-        let ev: [String: Any] = ["speak": "Dev，这是一条测试播报，语音清晰、顺序播放。", "voice": "mimo_default", "style": "语气自然。", "kind": "done", "project": "测试", "ts": Date().timeIntervalSince1970 * 1000, "detail": "点菜单里的测试播报触发。"]
+        let ev: [String: Any] = ["speak": "这是一条测试播报，语音清晰、顺序播放。", "voice": "mimo_default", "style": "语气自然。", "kind": "done", "project": "测试", "ts": Date().timeIntervalSince1970 * 1000, "detail": "点菜单里的测试播报触发。"]
         recordRecent(ev); player.enqueue(ev, delete: nil)
     }
     @objc func openPanel() {
@@ -210,6 +297,176 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if #available(macOS 13.0, *) {
             do { if SMAppService.mainApp.status == .enabled { try SMAppService.mainApp.unregister() } else { try SMAppService.mainApp.register() } } catch {}
         }
+    }
+
+    func migrateRemoteVoiceDefaultsIfNeeded() {
+        guard let legacy = UserDefaults(suiteName: "com.remotevoice.input") else { return }
+        var migrated: [String] = []
+        if (defaults.string(forKey: MacIdentity.defaultsKey) ?? "").isEmpty,
+           let macId = legacy.string(forKey: MacIdentity.defaultsKey), !macId.isEmpty {
+            defaults.set(macId, forKey: MacIdentity.defaultsKey)
+            migrated.append("macId=\(String(macId.prefix(8)))…")
+        }
+        if (defaults.string(forKey: "relayUrl") ?? "").isEmpty,
+           let url = legacy.string(forKey: "relayUrl"), !url.isEmpty {
+            defaults.set(url, forKey: "relayUrl")
+            migrated.append("relayUrl")
+        }
+        defaults.synchronize()
+        if migrated.isEmpty {
+            appLog("remote input defaults ready macId=\(String(MacIdentity.current.prefix(8))) relay=\(relayUrl)")
+        } else {
+            appLog("remote input migrated defaults: \(migrated.joined(separator: ", ")) relay=\(relayUrl)")
+        }
+    }
+
+    func setupRemoteInput() {
+        relayClient.macId = MacIdentity.current
+        relayClient.onState = { [weak self] state in self?.handleRelayState(state) }
+        relayClient.onEvent = { [weak self] event in self?.handleRelayEvent(event) }
+        requestAccessibilityPromptOnce()
+        appLog("remote input connecting macId=\(String(MacIdentity.current.prefix(8))) relay=\(relayUrl)")
+        relayClient.connect(to: relayUrl)
+    }
+
+    func requestAccessibilityPromptOnce() {
+        guard !AXIsProcessTrusted() else { return }
+        let opts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
+        _ = AXIsProcessTrustedWithOptions(opts)
+        appLog("remote input requested AX permission prompt")
+    }
+
+    func handleRelayState(_ state: RelayClient.State) {
+        DispatchQueue.main.async {
+            switch state {
+            case .connecting:
+                self.remoteConnectionTitle = "状态：连接中…"
+            case .connected:
+                self.remoteConnectionTitle = "状态：已连接"
+                appLog("remote input connected macId=\(String(MacIdentity.current.prefix(8)))")
+            case .disconnected:
+                self.remoteConnectionTitle = "状态：未连接"
+                self.remotePeerTitle = "对端：等待手机"
+                self.setSaturnIcon()
+                DictationHUD.shared.hide()
+            }
+        }
+    }
+
+    func handleRelayEvent(_ event: RelayClient.Event) {
+        DispatchQueue.main.async {
+            switch event {
+            case .macReady(let macId):
+                self.remotePeerTitle = "对端：等待手机"
+                self.setSaturnIcon()
+                self.pairingWC?.refreshIfOpen()
+                appLog("remote input mac_ready macId=\(String(macId.prefix(8)))")
+            case .shortCode(let code):
+                self.pairingWC?.applyShortCode(code)
+            case .devices(let list):
+                self.pairedDeviceCount = list.count
+                self.pairingWC?.applyDevices(list)
+                appLog("remote input devices=\(list.count)")
+            case .unpaired:
+                self.remotePeerTitle = "对端：已被移除，请重新扫码"
+                DictationHUD.shared.hide()
+                self.setSaturnIcon()
+            case .assign(let code):
+                self.remotePeerTitle = "配对码：\(code)"
+            case .paired(let peer):
+                if peer == "phone" {
+                    self.remotePeerTitle = "对端：手机已就绪"
+                    self.setSaturnIcon()
+                    self.relayClient.send(["type": "config", "llm_postprocess": self.llmOn])
+                    appLog("remote input paired peer=phone macId=\(String(MacIdentity.current.prefix(8)))")
+                }
+            case .peerGone:
+                self.remotePeerTitle = "对端：已断开"
+                DictationHUD.shared.hide()
+                self.setSaturnIcon()
+            case .config(let llm):
+                self.llmOn = llm
+            case .partial(let text):
+                self.setRecordingIcon()
+                DictationHUD.shared.showPartial(text)
+            case .final(let text, let injectId):
+                self.setSaturnIcon()
+                if text.isEmpty {
+                    DictationHUD.shared.hide()
+                    return
+                }
+                self.lastInjectedText = text
+                let outcome = self.injector.inject(text)
+                switch outcome {
+                case .typed:
+                    DictationHUD.shared.showFinal(text)
+                case .copied:
+                    DictationHUD.shared.showFinal("📋 已复制：\(text)")
+                case .failed:
+                    DictationHUD.shared.showFinal("⚠️ 注入失败：\(text)")
+                }
+                appLog("remote input injected id=\(injectId ?? "-") mode=\(outcome.mode) ok=\(outcome.ok)")
+                if let injectId {
+                    self.relayClient.send(["type": "inject_ack", "id": injectId, "ok": outcome.ok, "mode": outcome.mode])
+                }
+            case .key(let key, let injectId):
+                let outcome = self.injector.pressKey(key)
+                if outcome.mode == "type" {
+                    DictationHUD.shared.showFinal(key.lowercased().contains("paste") ? "📋 已粘贴" : "⏎ 回车")
+                }
+                appLog("remote input key id=\(injectId ?? "-") key=\(key) mode=\(outcome.mode) ok=\(outcome.ok)")
+                if let injectId {
+                    self.relayClient.send(["type": "inject_ack", "id": injectId, "ok": outcome.ok, "mode": outcome.mode])
+                }
+            case .error(let msg):
+                DictationHUD.shared.showFinal("⚠️ \(msg)")
+                appLog("remote input error \(msg)")
+            }
+        }
+    }
+
+    func shortMenuText(_ text: String, limit: Int) -> String {
+        let cleaned = text.replacingOccurrences(of: "\n", with: " ")
+        if cleaned.count <= limit { return cleaned }
+        return String(cleaned.prefix(limit)) + "…"
+    }
+
+    @objc func openPairing() {
+        if pairingWC == nil {
+            pairingWC = PairingWindowController(relay: relayClient, relayUrl: relayUrl)
+        }
+        pairingWC?.showAndRequest()
+    }
+
+    @objc func toggleLlm() {
+        llmOn.toggle()
+        relayClient.send(["type": "config", "llm_postprocess": llmOn])
+        appLog("remote input llm_postprocess=\(llmOn)")
+    }
+
+    @objc func editRelay() {
+        let alert = NSAlert()
+        alert.messageText = "中继服务器地址"
+        alert.informativeText = "WebSocket URL，例如 wss://your-host/ws"
+        let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 360, height: 24))
+        input.stringValue = relayUrl
+        alert.accessoryView = input
+        alert.addButton(withTitle: "保存")
+        alert.addButton(withTitle: "取消")
+        if alert.runModal() == .alertFirstButtonReturn {
+            let value = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !value.isEmpty else { return }
+            relayUrl = value
+            pairingWC?.close()
+            pairingWC = nil
+            appLog("remote input relay changed \(value)")
+            relayClient.connect(to: value)
+        }
+    }
+
+    @objc func reconnectRelay() {
+        appLog("remote input reconnect requested")
+        relayClient.connect(to: relayUrl)
     }
 }
 

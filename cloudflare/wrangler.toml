@@ -28,6 +28,7 @@ MIMO_BASE = "https://api.xiaomimimo.com/v1"
 MIMO_MODEL = "mimo-v2.5-tts"
 MIMO_VOICE = "mimo_default"
 USER_NAME = "Dev"
+USER_ALIASES = ""
 # 手机面板解锁密码（输对就换成真 token 种 cookie，免去手输令牌）。
 # 不要在此处硬编码密码——请用 Cloudflare secret 设置：
 #   wrangler secret put UNLOCK_PASSWORD

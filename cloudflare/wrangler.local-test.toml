@@ -1,0 +1,23 @@
+name = "claudevoice-local-test"
+main = "src/worker.js"
+compatibility_date = "2026-06-01"
+
+[assets]
+directory = "../public"
+binding = "ASSETS"
+run_worker_first = true
+
+[[durable_objects.bindings]]
+name = "HUB"
+class_name = "Hub"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Hub"]
+
+[vars]
+MIMO_BASE = "https://api.xiaomimimo.com/v1"
+MIMO_MODEL = "mimo-v2.5-tts"
+MIMO_VOICE = "mimo_default"
+USER_NAME = "Dev"
+USER_ALIASES = ""

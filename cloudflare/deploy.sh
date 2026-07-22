@@ -18,7 +18,7 @@ MIMO=$(grep -E '^MIMO_API_KEY=' ../.env | head -1 | cut -d= -f2-)
 HOOKSEC=$(grep -E '^HOOK_SECRET=' ../.env | head -1 | cut -d= -f2-)
 [ -n "$HOOKSEC" ] || HOOKSEC=$(openssl rand -hex 16)
 DASH=${DASH_TOKEN:-$(openssl rand -hex 16)}
-SUBJECT=${VAPID_SUBJECT:-mailto:sunlinhua@gmail.com}
+SUBJECT=${VAPID_SUBJECT:-mailto:you@example.com}
 
 echo "== 生成 VAPID 密钥（Web Push）=="
 VAPID=$(node -e 'const {webcrypto:c}=require("crypto");(async()=>{const kp=await c.subtle.generateKey({name:"ECDSA",namedCurve:"P-256"},true,["sign","verify"]);const b=x=>Buffer.from(x).toString("base64").replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,"");const pub=b(await c.subtle.exportKey("raw",kp.publicKey));const priv=JSON.stringify(await c.subtle.exportKey("jwk",kp.privateKey));process.stdout.write(pub+"\n"+priv);})();')

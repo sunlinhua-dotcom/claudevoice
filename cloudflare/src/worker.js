@@ -1,3 +1,5 @@
+import { deliveryPlan, normalizeBridgePayload } from './event-utils.mjs';
+
 /**
  * ClaudeVoice — Cloudflare Worker（边缘常驻中转站）
  *
@@ -27,6 +29,12 @@ const HONORIFICS = [
   '一把手', '董事长', '总裁', '掌柜的', '东家',
   '当家的', '当家人', '我们老大', '我的顶头上司', '话事人',
 ];
+
+// 用户认可的几种称呼：主名 USER_NAME + 备用别名 USER_ALIASES（逗号分隔），每次随机抽一个当开头。
+function userAddresses(env, U) {
+  const aliases = String(env.USER_ALIASES || '').split(/[，,]/).map((s) => s.trim()).filter(Boolean);
+  return [U, ...aliases];
+}
 
 // 内置「中文名 + TTS 读音」种子。name=屏幕显示；say=语音念的读音。
 const DEFAULT_PROJECTS = {
@@ -214,19 +222,22 @@ export class Hub {
       catch (_) { this.writers.delete(id); }
     }
     // 推手机：Web Push + Telegram + 飞书（不阻塞失败）；静音事件（子任务）不推手机
-    if (!ev.silent) await Promise.allSettled([this.sendPush(ev), this.sendTelegram(ev), this.sendLark(ev)]);
+    if (!ev.silent) {
+      const delivery = { push: () => this.sendPush(ev), telegram: () => this.sendTelegram(ev), lark: () => this.sendLark(ev) };
+      await Promise.allSettled(deliveryPlan(ev).map((name) => delivery[name]()));
+    }
   }
 
   larkText(ev) {
-    const icon = { done: '✅', waiting: '⏳', permission: '🔐', notification: '🔔', subagent: '🧩' }[ev.kind] || '🔔';
+    const icon = { done: '✅', waiting: '⏳', permission: '🔐', notification: '🔔', subagent: '🧩', failed: '❌' }[ev.kind] || '🔔';
     let t = `${icon} ${ev.project} · ${ev.title}\n${ev.speak}`;
     if (ev.detail && ev.detail !== ev.title) t += `\n\n${ev.detail}`;
     return t;
   }
   larkCard(ev) {
-    const KMAP = { done: { c: 'green', l: '已完成' }, waiting: { c: 'orange', l: '等待输入' }, permission: { c: 'red', l: '需要授权' }, notification: { c: 'blue', l: '通知' }, subagent: { c: 'violet', l: '子任务' } };
+    const KMAP = { done: { c: 'green', l: '已完成' }, waiting: { c: 'orange', l: '等待输入' }, permission: { c: 'red', l: '需要授权' }, notification: { c: 'blue', l: '通知' }, subagent: { c: 'violet', l: '子任务' }, failed: { c: 'red', l: '任务失败' } };
     const k = KMAP[ev.kind] || { c: 'blue', l: ev.kind };
-    const icon = { done: '✅', waiting: '⏳', permission: '🔐', notification: '🔔', subagent: '🧩' }[ev.kind] || '🔔';
+    const icon = { done: '✅', waiting: '⏳', permission: '🔐', notification: '🔔', subagent: '🧩', failed: '❌' }[ev.kind] || '🔔';
     const elements = [{ tag: 'div', text: { tag: 'lark_md', content: '**' + ev.speak + '**' } }];
     if (ev.detail && ev.detail !== ev.title) {
       elements.push({ tag: 'hr' });
@@ -317,7 +328,7 @@ export class Hub {
   async sendTelegram(ev) {
     const tok = this.env.TELEGRAM_BOT_TOKEN, chat = this.env.TELEGRAM_CHAT_ID;
     if (!tok || !chat) return;
-    const icon = { done: '✅', waiting: '⏳', permission: '🔐', notification: '🔔', subagent: '🧩' }[ev.kind] || '🔔';
+    const icon = { done: '✅', waiting: '⏳', permission: '🔐', notification: '🔔', subagent: '🧩', failed: '❌' }[ev.kind] || '🔔';
     const text = `${icon} ${ev.speak}` + (ev.detail ? `\n\n${ev.detail}` : '');
     try {
       await fetch(`https://api.telegram.org/bot${tok}/sendMessage`, {
@@ -330,6 +341,8 @@ export class Hub {
 
 // ============================ 事件规整（与 server.js 同逻辑）============================
 async function normalizeEvent(payload, env) {
+  const bridgeEvent = normalizeBridgePayload(payload);
+  if (bridgeEvent) return bridgeEvent;
   const eventName = payload.hook_event_name || payload.hookEventName || '';
   const cwd = payload.cwd || payload.workspace || '';
   const projectKey = baseName(cwd) || 'unknown';
@@ -406,7 +419,7 @@ async function aiSummarize(env, text) {
 // 统一格式：中文名 + 敬称 + 目录名 + 任务状态 + 具体描述
 async function buildSpeak(env, kind, U, proj, tool, detail) {
   if (kind === 'done') return await buildDoneSpeak(env, U, proj, detail);
-  const g = `${U}，${pick(HONORIFICS)}，`;
+  const g = `${pick(userAddresses(env, U))}，${pick(HONORIFICS)}，`;
   const P = {
     waiting: [
       `${g}目录 ${proj} 正在等你输入，回去看一下吧。`,
@@ -424,7 +437,7 @@ async function buildSpeak(env, kind, U, proj, tool, detail) {
   return pick(P[kind] || P.notification);
 }
 async function buildDoneSpeak(env, U, proj, detail) {
-  const g = `${U}，${pick(HONORIFICS)}，`;
+  const g = `${pick(userAddresses(env, U))}，${pick(HONORIFICS)}，`;
   const raw = (detail || '').trim();
   if (!raw || raw === '本轮任务结束。') {
     return pick([

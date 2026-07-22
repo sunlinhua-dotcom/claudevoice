@@ -1,0 +1,10 @@
+{
+  "myproject": {
+    "path": "/absolute/path/to/your/project",
+    "source": "seed"
+  },
+  "anotherapp": {
+    "path": "/absolute/path/to/another/project",
+    "source": "seed"
+  }
+}

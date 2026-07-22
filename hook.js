@@ -10,6 +10,9 @@
 
 'use strict';
 
+// cc-bridge 自己启动的 headless Claude 会通过飞书管理状态，避免全局 hook 再发一份通知。
+if (process.env.CC_BRIDGE === '1') process.exit(0);
+
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
