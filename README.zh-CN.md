@@ -29,7 +29,8 @@
 **ClaudeVoice 把每一个 Claude Code 会话变成「能听见」的。** 任何项目一旦完成、或者需要你，它当场说出来——是**哪个**项目、**要你做什么**——还能顺手推到你手机上。
 
 <div align="center">
-<img src="assets/hero-shot.png" alt="ClaudeVoice 指挥台正在播报，手机同时收到推送" width="880">
+<img src="assets/demo.gif" alt="ClaudeVoice 指挥台正在播报，手机同时收到推送" width="880">
+<br><sub>指挥台播报是哪个项目需要你，同时推到手机。</sub>
 </div>
 
 ---

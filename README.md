@@ -29,7 +29,8 @@ The more agents you run in parallel, the worse it gets. You end up babysitting t
 **ClaudeVoice turns every Claude Code session into something you can hear.** The moment any project finishes or needs you, it says so out loud — *which* project, and *what* it needs — and can ping your phone too.
 
 <div align="center">
-<img src="assets/hero-shot.png" alt="ClaudeVoice command deck speaking, and a phone receiving push notifications" width="880">
+<img src="assets/demo.gif" alt="ClaudeVoice command deck speaking, and a phone receiving push notifications" width="880">
+<br><sub>The command deck speaks which project needs you, and pings your phone.</sub>
 </div>
 
 ---
