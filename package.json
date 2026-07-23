@@ -1,6 +1,6 @@
 {
   "name": "claudevoice",
-  "version": "1.0.0",
+  "version": "2.1.0",
   "description": "Claude Code 全局语音通知台 —— 任务完成/等待输入时，网页按项目配色并用 Edge 神经语音播报。",
   "main": "server.js",
   "scripts": {
@@ -8,6 +8,8 @@
     "setup": "node setup.js",
     "uninstall-hooks": "node setup.js --remove"
   },
-  "engines": { "node": ">=14" },
+  "engines": {
+    "node": ">=14"
+  },
   "license": "MIT"
 }
