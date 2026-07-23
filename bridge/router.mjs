@@ -10,6 +10,17 @@ export class LruSet {
   }
 }
 
+function formatPingTime(value) {
+  return Number(value) > 0 ? new Date(Number(value)).toISOString() : '尚无记录';
+}
+
+export function formatPingStatus({
+  now = Date.now(), connectedAt = 0, lastEventAt = 0,
+} = {}) {
+  const current = typeof now === 'function' ? now() : now;
+  return `pong ${formatPingTime(current)} | 长连接建立于 ${formatPingTime(connectedAt)} | 最近事件 ${formatPingTime(lastEventAt)}`;
+}
+
 export function parseCommand(input) {
   const text = String(input || '').trim();
   if (!text) return null;
@@ -26,6 +37,7 @@ export function parseCommand(input) {
     [/^续会话(?:\s+(\d+))?$/, '/resume $1'],
     [/^输入模式$/, '/input'],
     [/^任务模式$/, '/task'],
+    [/^自检$/, '/ping'],
     [/^帮助$/, '/help'],
   ];
   let normalized = text;
@@ -33,7 +45,7 @@ export function parseCommand(input) {
     if (pattern.test(text)) { normalized = text.replace(pattern, replacement).trim(); break; }
   }
   if (!normalized.startsWith('/')) return null;
-  const match = /^\/(projects|use|new|status|stop|clear|mode|model|sessions|resume|input|task|help)(?:\s+([\s\S]*))?$/i.exec(normalized);
+  const match = /^\/(projects|use|new|status|stop|clear|mode|model|sessions|resume|input|task|ping|help)(?:\s+([\s\S]*))?$/i.exec(normalized);
   if (!match) return { name: 'unknown', args: normalized.slice(1) };
   return { name: match[1].toLowerCase(), args: (match[2] || '').trim() };
 }

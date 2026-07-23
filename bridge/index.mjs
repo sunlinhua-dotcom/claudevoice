@@ -6,8 +6,9 @@ import { join } from 'node:path';
 import { ApprovalServer } from './approval-server.mjs';
 import { CardService } from './cards.mjs';
 import { copyTextToClipboard, RelayInjector, DisabledInjector, writeAttachmentsToClipboard } from './inject.mjs';
+import { createObservedDispatcher, createSdkLogger, LarkConnectionManager } from './lark-connection.mjs';
 import { extractOutputFiles, MediaStore, parseAttachmentMessage } from './media.mjs';
-import { createCardActionHandler, createMessageHandler } from './router.mjs';
+import { createCardActionHandler, createMessageHandler, formatPingStatus } from './router.mjs';
 import { ClaudeRunner } from './runner.mjs';
 import { SessionStore } from './sessions.mjs';
 import { checkFfmpeg, transcribeLarkAudio } from './stt.mjs';
@@ -19,7 +20,8 @@ const BRIGHT_OPEN_ID = ''; // owner 的飞书 open_id 从 .env 的 LARK_OPEN_ID 
 export class BridgeController {
   constructor({
     store, runner, cards, approval, injector = new DisabledInjector(), clipboard = copyTextToClipboard,
-    media = null, attachmentClipboard = writeAttachmentsToClipboard, events = null, log = console,
+    media = null, attachmentClipboard = writeAttachmentsToClipboard, events = null,
+    connectionHealth = null, log = console,
   }) {
     this.store = store;
     this.runner = runner;
@@ -30,6 +32,7 @@ export class BridgeController {
     this.media = media;
     this.attachmentClipboard = attachmentClipboard;
     this.events = events;
+    this.connectionHealth = connectionHealth;
     this.log = log;
   }
 
@@ -197,6 +200,13 @@ export class BridgeController {
 
   async handleCommand(command, { message }) {
     const reply = (text) => this.cards.replyText(message.message_id, text);
+    if (command.name === 'ping') {
+      return reply(formatPingStatus({
+        now: this.connectionHealth?.now || Date.now,
+        connectedAt: this.connectionHealth?.connectedAt || 0,
+        lastEventAt: this.connectionHealth?.lastEventAt || 0,
+      }));
+    }
     if (command.name === 'projects') {
       const current = this.store.state.currentProject;
       const lines = this.store.listProjects().map((item) => `${item.index}. ${item.name}${item.name === current ? ' ← 当前' : ''}\n   ${item.path}`);
@@ -283,6 +293,8 @@ export class BridgeController {
       '图片 / 文件 / 视频 / 富文本附件　input 模式进入 Mac 剪贴板；task 模式交给 Claude',
       '多任务并行时，引用回复对应任务卡即可精准追问',
       '审批卡可直接回复：允许 / 拒绝；决策卡可回复选项或序号',
+      '', '🩺 链路自检',
+      '/ping｜立即检查消息事件、命令路由与回复链路',
       '', '/help　显示本帮助',
     ].join('\n');
   }
@@ -476,9 +488,8 @@ export async function createBridge({ dir = import.meta.dirname } = {}) {
   const approvalPort = Number(process.env.CC_APPROVAL_PORT) || 18791;
   const approvalToken = process.env.CC_APPROVAL_TOKEN || randomBytes(32).toString('hex');
   const store = await new SessionStore({ dir, globalLimit: Number(process.env.CC_GLOBAL_LIMIT) || 3 }).init();
-  const sdkLogger = {
-    debug: () => {}, info: () => {}, warn: () => log.warn('飞书 SDK 警告（敏感细节已隐藏）'), error: () => log.error('飞书 SDK 请求失败（敏感细节已隐藏）'),
-  };
+  const sdkLogger = createSdkLogger({ log, secrets: [appId, appSecret] });
+  const connectionHealth = { connectedAt: 0, lastEventAt: 0 };
   const client = new lark.Client({ appId, appSecret, domain: lark.Domain.Feishu, logger: sdkLogger });
   const media = new MediaStore({ client, projectPaths: Object.values(store.projects).map((item) => item.path) });
   const removedMediaDirs = await media.init();
@@ -498,7 +509,9 @@ export async function createBridge({ dir = import.meta.dirname } = {}) {
     askTimeoutMs: Number(process.env.CC_ASK_TIMEOUT_MS) || 15 * 60_000,
     log,
   });
-  controller = new BridgeController({ store, runner, cards, approval, injector, media, events, log });
+  controller = new BridgeController({
+    store, runner, cards, approval, injector, media, events, connectionHealth, log,
+  });
   const transcribeAudio = async (message) => {
     if (!ffmpeg.ok) throw new Error('本机 ffmpeg 不可用，请安装后重试');
     let content = {};
@@ -507,24 +520,30 @@ export async function createBridge({ dir = import.meta.dirname } = {}) {
   };
   const messageHandler = createMessageHandler({ ownerId, store, controller, cards, injector, transcribeAudio, media, log });
   const actionHandler = createCardActionHandler({ ownerId, controller, log });
-  const dispatcher = new lark.EventDispatcher({}).register({
+  const dispatcher = createObservedDispatcher(new lark.EventDispatcher({}).register({
     'im.message.receive_v1': messageHandler,
     'card.action.trigger': actionHandler,
+  }), { health: connectionHealth, log });
+  const connection = new LarkConnectionManager({
+    dispatcher,
+    health: connectionHealth,
+    secrets: [appId, appSecret],
+    log,
+    clientFactory: (callbacks) => new lark.WSClient({
+      appId,
+      appSecret,
+      domain: lark.Domain.Feishu,
+      logger: sdkLogger,
+      autoReconnect: true,
+      handshakeTimeoutMs: 20_000,
+      wsConfig: { pingTimeout: 10 },
+      ...callbacks,
+    }),
   });
-  const wsClient = new lark.WSClient({
-    appId,
-    appSecret,
-    domain: lark.Domain.Feishu,
-    logger: sdkLogger,
-    autoReconnect: true,
-    handshakeTimeoutMs: 20_000,
-    wsConfig: { pingTimeout: 10 },
-    onReady: () => log.info('飞书长连接已就绪'),
-    onReconnecting: () => log.warn('飞书长连接断开，SDK 正在重连'),
-    onReconnected: () => log.info('飞书长连接已恢复'),
-    onError: (error) => log.error('飞书长连接终止错误', error?.message || error),
-  });
-  return { appId, ownerId, log, store, client, cards, runner, injector, media, events, approval, controller, dispatcher, wsClient };
+  return {
+    appId, ownerId, log, store, client, cards, runner, injector, media, events,
+    approval, controller, dispatcher, connectionHealth, connection,
+  };
 }
 
 export async function main() {
@@ -532,7 +551,7 @@ export async function main() {
   await bridge.approval.start();
   bridge.log.info(`审批服务监听 127.0.0.1:${bridge.approval.port}`);
   bridge.controller.start();
-  await bridge.wsClient.start({ eventDispatcher: bridge.dispatcher });
+  await bridge.connection.start();
   bridge.log.info(`cc-bridge 已启动，app=${redact(bridge.appId)} owner=${redact(bridge.ownerId)}`);
   let exiting = false;
   const shutdown = async (signal) => {
@@ -540,7 +559,7 @@ export async function main() {
     exiting = true;
     bridge.log.info(`收到 ${signal}，正在优雅退出`);
     for (const task of bridge.store.listTasks({ activeOnly: true })) await bridge.store.stopTask(task.id);
-    bridge.wsClient.close({ force: true });
+    bridge.connection.close();
     bridge.injector.close();
     await bridge.approval.close().catch(() => {});
     await bridge.store.save().catch(() => {});

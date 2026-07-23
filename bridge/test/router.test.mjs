@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createCardActionHandler, createMessageHandler, LruSet, parseCommand } from '../router.mjs';
+import { BridgeController } from '../index.mjs';
+import { createCardActionHandler, createMessageHandler, formatPingStatus, LruSet, parseCommand } from '../router.mjs';
 
 const OWNER = 'ou_owner';
 
@@ -34,10 +35,37 @@ function harness({ transcribeAudio, media, askText } = {}) {
 
 test('命令解析支持斜杠与中文别名', () => {
   assert.deepEqual(parseCommand('/use 2'), { name: 'use', args: '2' });
+  assert.deepEqual(parseCommand('/ping'), { name: 'ping', args: '' });
   assert.deepEqual(parseCommand('项目列表'), { name: 'projects', args: '' });
   assert.deepEqual(parseCommand('切到 remotevoice'), { name: 'use', args: 'remotevoice' });
   assert.deepEqual(parseCommand('停止 7'), { name: 'stop', args: '7' });
   assert.equal(parseCommand('普通任务'), null);
+});
+
+test('/ping 自检只返回连接时间，不包含事件正文', () => {
+  const text = formatPingStatus({
+    now: Date.parse('2026-07-23T08:00:00.000Z'),
+    connectedAt: Date.parse('2026-07-23T07:00:00.000Z'),
+    lastEventAt: Date.parse('2026-07-23T07:59:59.000Z'),
+  });
+  assert.equal(text, 'pong 2026-07-23T08:00:00.000Z | 长连接建立于 2026-07-23T07:00:00.000Z | 最近事件 2026-07-23T07:59:59.000Z');
+  assert.doesNotMatch(text, /content|正文|secret/i);
+});
+
+test('BridgeController 立即回复 /ping 自检状态', async () => {
+  const replies = [];
+  const controller = new BridgeController({
+    store: {}, runner: {}, approval: {},
+    cards: { replyText: async (id, text) => replies.push({ id, text }) },
+    connectionHealth: {
+      now: () => Date.parse('2026-07-23T08:00:00.000Z'),
+      connectedAt: Date.parse('2026-07-23T07:00:00.000Z'),
+      lastEventAt: Date.parse('2026-07-23T07:59:59.000Z'),
+    },
+  });
+  await controller.handleCommand({ name: 'ping', args: '' }, { message: { message_id: 'm-ping' } });
+  assert.equal(replies[0].id, 'm-ping');
+  assert.match(replies[0].text, /^pong 2026-07-23T08:00:00.000Z \| 长连接建立于 /);
 });
 
 test('非主人只能收到固定拒绝回复', async () => {
