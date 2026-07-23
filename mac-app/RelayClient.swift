@@ -48,17 +48,20 @@ struct Device: Identifiable, Equatable {
 
 final class RelayClient: NSObject {
 
-    /// 默认中继地址：占位符——请改成你自己部署的 Cloudflare Worker 域名（见 REPRODUCE.md 第 3 步），
-    /// 或启动后在 App 菜单「服务器地址」里填一次（存 UserDefaults，优先于此默认值，rebuild 不丢）。
-    static let defaultRelayURL = "wss://YOUR-WORKER-SUBDOMAIN.workers.dev/ws"
-    /// 老版本的本地默认值；迁移成云端，省得已经跑过旧版的人还要去菜单手改。
+    /// 老版本的本地默认值；新版本把它视为“未配置”，避免无意义重连。
     static let legacyLocalRelayURL = "ws://localhost:8787/ws"
 
-    /// 解析要连的中继地址：用户显式设过别的就用它；没设过、或还停在老的 localhost 默认值，就用云端。
-    /// （本机调试想连 localhost，临时改这里的常量或在菜单填一个非 localhost 的地址即可。）
-    static func resolveRelayURL(_ stored: String?) -> String {
-        if let s = stored, !s.isEmpty, s != legacyLocalRelayURL { return s }
-        return defaultRelayURL
+    /// 用户手填值优先，其次读取 claudevoice-app.json 的 relay；都没有就禁用中继。
+    /// 远程输入是附加能力，未配置绝不能影响 TTS 播报主线。
+    static func resolveRelayURL(_ stored: String?, configured: String) -> String {
+        if let value = stored?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !value.isEmpty,
+           value != legacyLocalRelayURL {
+            return value
+        }
+        let value = configured.trimmingCharacters(in: .whitespacesAndNewlines)
+        if value.hasPrefix("ws://") || value.hasPrefix("wss://") { return value }
+        return ""
     }
 
     enum State { case connecting, connected, disconnected }

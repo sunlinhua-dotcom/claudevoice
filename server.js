@@ -5,7 +5,7 @@
  * 职责：
  *  1. 接收 Claude Code 全局 hook 推来的事件 (POST /hook)
  *  2. 通过 SSE 把事件实时推给所有打开的网页 (GET /events)
- *  3. 代理小米 MiMo TTS 合成语音，API key 只留在服务端 (POST /tts)
+ *  3. 代理微软 Edge 神经语音，可选 Azure 兜底 (POST /tts)
  *  4. 托管网页面板 (GET /)
  *
  * 纯 Node 内置模块，无需 npm install。
@@ -27,13 +27,10 @@ loadDotenv(path.join(__dirname, '.env'));
 const CFG = {
   host: process.env.HOST || '0.0.0.0',
   port: parseInt(process.env.PORT || '8787', 10),
-  mimoKey: process.env.MIMO_API_KEY || '',
-  mimoBase: (process.env.MIMO_BASE || 'https://api.xiaomimimo.com/v1').replace(/\/$/, ''),
-  mimoModel: process.env.MIMO_MODEL || 'mimo-v2-tts',
-  mimoVoice: process.env.MIMO_VOICE || 'mimo_default',
-  ttsEngine: (process.env.TTS_ENGINE || 'edge').toLowerCase(), // 首选引擎：edge(默认,免key) / azure / mimo
-  azureKey: process.env.AZURE_SPEECH_KEY || '',                // Azure 兜底（可选，免费层每月 50 万字符）
-  azureRegion: process.env.AZURE_SPEECH_REGION || '',          // 如 eastasia / eastus
+  ttsEngine: (process.env.TTS_ENGINE || 'edge').toLowerCase(), // 保留配置显示；实际可靠性链固定为 edge → azure
+  defaultVoice: process.env.TTS_VOICE || '茉莉',
+  azureKey: process.env.AZURE_SPEECH_KEY || '',
+  azureRegion: process.env.AZURE_SPEECH_REGION || '',
   subagentMode: (process.env.CV_SUBAGENT || 'silent').toLowerCase(), // 子任务：silent(默认,只显示不出声) / voice / off
   hookSecret: process.env.HOOK_SECRET || '',
   dashToken: process.env.DASH_TOKEN || '', // 设了就要求 ?token= 才能看面板/SSE/TTS
@@ -47,7 +44,7 @@ const CFG = {
   dashUrl: process.env.DASH_URL || '',                // 卡片「打开面板」按钮指向（公网面板地址）
 };
 
-// v2.5-tts 的内置音色（男女分组）。每个项目按名字 hash 稳定分到一个；
+// 内置音色（男女分组）。每个项目按名字 hash 稳定分到一个；
 // projects.json 里可用 "voice" 覆盖。英文名音色(Mia/Chloe/Milo/Dean)英文发音更好。
 // 只用中文音色（英文音色 Dean/Mia/Chloe/Milo 读中文会变乱码）。保留男女区分。
 const VOICE_POOL = [
@@ -143,7 +140,7 @@ server.listen(CFG.port, CFG.host, () => {
   log(`ClaudeVoice 已启动 → ${url}`);
   log(`  hook 接收:  POST ${url}/hook   (密钥: ${CFG.hookSecret ? '已设置' : '⚠ 未设置'})`);
   log(`  面板:       ${url}/${CFG.dashToken ? '?token=***' : ''}`);
-  log(`  MiMo TTS:   ${CFG.mimoKey ? CFG.mimoModel + ' / ' + CFG.mimoVoice : '⚠ 未配置 MIMO_API_KEY'}`);
+  log(`  TTS:        Edge 神经语音${CFG.azureKey && CFG.azureRegion ? ' → Azure 兜底' : ''}`);
 });
 
 // =================================================================
@@ -384,23 +381,23 @@ function sendSse(res, obj) {
 }
 
 // =================================================================
-// TTS 代理：调用 MiMo，返回音频字节（key 不出服务端）
+// TTS 代理：Edge 免 key，失败重试后可回落到 Azure
 // =================================================================
 function handleTts(req, res, u) {
   const secOK = CFG.hookSecret && req.headers['x-cv-secret'] === CFG.hookSecret;
   if (!checkToken(u, req) && !secOK) { json(res, 401, { error: 'token required' }); return; }
-  // 不再强依赖 MIMO key：首选 edge-tts 免 key 即可发声
+  // Edge 免 key 即可发声；配置 Azure 后可作为兜底。
 
   readBody(req, 16 * 1024).then((raw) => {
     let body = {};
     try { body = JSON.parse(raw || '{}'); } catch (_) {}
     const text = (body.text || '').toString().slice(0, 800);
     if (!text) { json(res, 400, { error: 'text 必填' }); return; }
-    const voice = (body.voice || CFG.mimoVoice).toString();
+    const voice = (body.voice || CFG.defaultVoice).toString();
     const style = (body.style || '').toString().slice(0, 200);
     const format = body.format === 'wav' ? 'wav' : 'mp3';
 
-    const cacheKey = sha1([text, voice, style, format, CFG.ttsEngine, CFG.mimoModel].join('|'));
+    const cacheKey = sha1([text, voice, style, format, CFG.ttsEngine].join('|'));
     const hit = ttsCache.get(cacheKey);
     if (hit) { sendAudio(res, hit.buf, format); return; }
 
@@ -414,22 +411,51 @@ function handleTts(req, res, u) {
   }).catch((e) => json(res, 400, { error: String(e) }));
 }
 
-// 引擎调度：按 [首选, edge, azure, mimo] 顺序，只用已配置可用的，失败自动回落
+// 引擎调度固定为 edge →（配置了 key 才有）azure。
 function ttsOrder() {
-  const have = { edge: true, azure: !!(CFG.azureKey && CFG.azureRegion), mimo: !!CFG.mimoKey };
-  const order = [CFG.ttsEngine, 'edge', 'azure', 'mimo'].filter((e, i, a) => a.indexOf(e) === i && have[e]);
-  return order.length ? order : ['edge'];
+  return CFG.azureKey && CFG.azureRegion ? ['edge', 'azure'] : ['edge'];
 }
 async function synthTTS({ text, voice, style, format }) {
   let lastErr;
   for (const eng of ttsOrder()) {
     try {
-      if (eng === 'edge') return { buf: await edge.synthEdge(text, voice, format), engine: 'edge' };
-      if (eng === 'azure') return { buf: await synthAzure({ text, voice, format }), engine: 'azure' };
-      if (eng === 'mimo') return { buf: await synthMimo({ text, voice, style, format }), engine: 'mimo' };
+      const buf = await retryTts(eng, async () => {
+        if (eng === 'edge') return edge.synthEdge(text, voice, format);
+        return synthAzure({ text, voice, format });
+      });
+      assertAudio(buf, eng);
+      return { buf, engine: eng };
     } catch (e) { lastErr = e; log(`TTS ${eng} 失败(${e.message})，回落下一个`); }
   }
   throw lastErr || new Error('无可用 TTS 引擎');
+}
+
+async function retryTts(engine, synth) {
+  let lastError;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const buf = await synth();
+      assertAudio(buf, engine);
+      return buf;
+    } catch (error) {
+      lastError = error;
+      if (attempt === 2) break;
+      const delay = 250 * (2 ** attempt);
+      log(`TTS ${engine} 第 ${attempt + 1} 次失败(${error.message})，${delay}ms 后重试`);
+      await sleep(delay);
+    }
+  }
+  throw lastError || new Error(`${engine} 合成失败`);
+}
+
+function assertAudio(buf, engine) {
+  if (!buf || typeof buf.length !== 'number' || buf.length === 0) {
+    throw new Error(`${engine} 返回空音频`);
+  }
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function escXml(s) {
@@ -457,53 +483,11 @@ function synthAzure({ text, voice, format }) {
   });
 }
 
-function synthMimo({ text, voice, style, format }) {
-  return new Promise((resolve, reject) => {
-    const payload = JSON.stringify({
-      model: CFG.mimoModel,
-      messages: [
-        { role: 'user', content: style || '' },
-        { role: 'assistant', content: text },
-      ],
-      audio: { format, voice },
-    });
-    const target = new URL(CFG.mimoBase + '/chat/completions');
-    const opts = {
-      method: 'POST',
-      hostname: target.hostname,
-      path: target.pathname + target.search,
-      port: target.port || 443,
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: 'Bearer ' + CFG.mimoKey,
-        'Content-Length': Buffer.byteLength(payload),
-      },
-    };
-    const r = https.request(opts, (resp) => {
-      const chunks = [];
-      resp.on('data', (c) => chunks.push(c));
-      resp.on('end', () => {
-        const txt = Buffer.concat(chunks).toString('utf8');
-        if (resp.statusCode !== 200) {
-          return reject(new Error(`MiMo ${resp.statusCode}: ${clip(txt, 200)}`));
-        }
-        let data;
-        try { data = JSON.parse(txt); } catch (e) { return reject(new Error('返回非 JSON')); }
-        const b64 = data && data.choices && data.choices[0] &&
-          data.choices[0].message && data.choices[0].message.audio &&
-          data.choices[0].message.audio.data;
-        if (!b64) return reject(new Error('返回缺少 audio.data'));
-        resolve(Buffer.from(b64, 'base64'));
-      });
-    });
-    r.on('error', reject);
-    r.setTimeout(60000, () => r.destroy(new Error('MiMo 超时')));
-    r.write(payload);
-    r.end();
-  });
-}
-
 function sendAudio(res, buf, format) {
+  if (!buf || !buf.length) {
+    json(res, 502, { error: 'TTS 失败', detail: '合成结果为空' });
+    return;
+  }
   res.writeHead(200, {
     'Content-Type': format === 'wav' ? 'audio/wav' : 'audio/mpeg',
     'Content-Length': buf.length,
@@ -527,8 +511,8 @@ function handleConfig(res) {
   // 无敏感信息（不含 key/secret），不做 token 限制
   json(res, 200, {
     voicePool: VOICE_POOL,
-    defaultVoice: CFG.mimoVoice,
-    model: CFG.mimoModel,
+    defaultVoice: CFG.defaultVoice,
+    model: 'edge-neural',
     userName: CFG.userName,
     requiresToken: !!CFG.dashToken,
     vapidPublic: '',   // 本地不开 Web Push（那是 Cloudflare Worker 部署才有）

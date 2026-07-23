@@ -13,6 +13,7 @@ cloudflare/.wrangler/
 
 # 编译产物（用 mac-app/build.sh 从 main.swift 重新构建）
 mac-app/ClaudeVoice
+mac-app/build/
 
 # cc-bridge 运行时状态与 RemoteVoice 长期设备凭证
 bridge/state.json

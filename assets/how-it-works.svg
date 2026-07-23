@@ -22,7 +22,7 @@
   <g>
     <rect x="736" y="150" width="250" height="150" rx="16" fill="#FFFFFF" stroke="#E0876A" stroke-width="2"/>
     <text x="861" y="200" text-anchor="middle" font-size="19" font-weight="600" fill="#2B2B2B">③ 语音播报</text>
-    <text x="861" y="235" text-anchor="middle" font-size="15" fill="#646A73">edge / Azure / MiMo</text>
+    <text x="861" y="235" text-anchor="middle" font-size="15" fill="#646A73">Edge / Azure</text>
     <text x="861" y="260" text-anchor="middle" font-size="15" fill="#646A73">TTS + 颜色区分项目</text>
   </g>
   <g stroke="#BBBFC4" stroke-width="2.5" fill="none"><path d="M986 225 H1054" marker-end="url(#a)"/></g>

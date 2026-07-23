@@ -5,14 +5,15 @@ import { deliveryPlan, normalizeBridgePayload } from './event-utils.mjs';
  *
  *  Mac: hook.js ──POST /hook──► 本 Worker
  *  Worker: 规整事件 → Durable Object(Hub) 用 SSE 推给网页
- *          + Web Push 推手机 + Telegram 消息；并代理 MiMo TTS
+ *          + Web Push 推手机 + Telegram 消息；并代理 Edge/Azure TTS
  *  静态面板从 assets(../public) 提供。
  *
  *  Secrets（wrangler secret put）：
- *    MIMO_API_KEY, HOOK_SECRET, DASH_TOKEN,
+ *    HOOK_SECRET, DASH_TOKEN,
+ *    AZURE_SPEECH_KEY, AZURE_SPEECH_REGION,
  *    VAPID_PUBLIC, VAPID_PRIVATE(JWK json), VAPID_SUBJECT,
  *    TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
- *  Vars（wrangler.toml [vars]）：MIMO_BASE, MIMO_MODEL, MIMO_VOICE, USER_NAME
+ *  Vars（wrangler.toml [vars]）：TTS_ENGINE, TTS_VOICE, USER_NAME
  */
 
 // 只用中文音色（英文音色读中文会变乱码）。保留男女区分。
@@ -124,8 +125,8 @@ export default {
     if (p === '/config') {
       return jsonResp({
         voicePool: VOICE_POOL,
-        defaultVoice: env.MIMO_VOICE || 'Dean',
-        model: env.MIMO_MODEL || 'mimo-v2.5-tts',
+        defaultVoice: env.TTS_VOICE || '茉莉',
+        model: 'edge-neural',
         userName: env.USER_NAME || 'Dev',
         requiresToken: !!env.DASH_TOKEN,
         vapidPublic: env.VAPID_PUBLIC || '',
@@ -498,7 +499,7 @@ function buildStyle(kind) {
   return pick(tones);
 }
 
-// ============================ TTS 代理（edge 首选 → azure 兜底 → mimo 兜底）============================
+// ============================ TTS 代理（edge 首选 → azure 兜底）============================
 // 项目 4 音色 → Edge/Azure 同名神经语音（实测可用的 zh-CN 音色）
 const EDGE_VOICE_MAP = { '茉莉': 'zh-CN-XiaoxiaoNeural', '冰糖': 'zh-CN-XiaoyiNeural', '白桦': 'zh-CN-YunxiNeural', '苏打': 'zh-CN-YunyangNeural' };
 const EDGE_DEFAULT_VOICE = 'zh-CN-XiaoxiaoNeural';
@@ -585,26 +586,8 @@ async function azureSynthW(text, voice, format, env) {
   return new Uint8Array(await r.arrayBuffer());
 }
 
-// 小米 MiMo（最后兜底）
-async function mimoSynthW(text, voice, style, format, env) {
-  if (!env.MIMO_API_KEY) throw new Error('MIMO 未配置');
-  const base = (env.MIMO_BASE || 'https://api.xiaomimimo.com/v1').replace(/\/$/, '');
-  const r = await fetch(base + '/chat/completions', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', authorization: 'Bearer ' + env.MIMO_API_KEY },
-    body: JSON.stringify({ model: env.MIMO_MODEL || 'mimo-v2.5-tts', messages: [{ role: 'user', content: style }, { role: 'assistant', content: text }], audio: { format, voice } }),
-  });
-  if (!r.ok) throw new Error('MiMo ' + r.status + ': ' + (await r.text()).slice(0, 150));
-  const data = await r.json();
-  const b64 = data?.choices?.[0]?.message?.audio?.data;
-  if (!b64) throw new Error('MiMo 返回缺少 audio.data');
-  return b64ToBytes(b64);
-}
-
 function ttsOrderW(env) {
-  const have = { edge: true, azure: !!(env.AZURE_SPEECH_KEY && env.AZURE_SPEECH_REGION), mimo: !!env.MIMO_API_KEY };
-  const primary = (env.TTS_ENGINE || 'edge').toLowerCase();
-  return [primary, 'edge', 'azure', 'mimo'].filter((e, i, a) => a.indexOf(e) === i && have[e]);
+  return env.AZURE_SPEECH_KEY && env.AZURE_SPEECH_REGION ? ['edge', 'azure'] : ['edge'];
 }
 
 async function handleTts(req, env, cors) {
@@ -612,21 +595,43 @@ async function handleTts(req, env, cors) {
   try { body = await req.json(); } catch (_) {}
   const text = (body.text || '').toString().slice(0, 800);
   if (!text) return jsonResp({ error: 'text 必填' }, 400, cors);
-  const voice = (body.voice || env.MIMO_VOICE || '').toString();
-  const style = (body.style || '').toString().slice(0, 300);
+  const voice = (body.voice || env.TTS_VOICE || '茉莉').toString();
   const format = body.format === 'wav' ? 'wav' : 'mp3';
   let lastErr = '';
   for (const eng of ttsOrderW(env)) {
     try {
-      let bytes;
-      if (eng === 'edge') bytes = await edgeSynthW(text, voice, format);
-      else if (eng === 'azure') bytes = await azureSynthW(text, voice, format, env);
-      else if (eng === 'mimo') bytes = await mimoSynthW(text, voice, style, format, env);
-      else continue;
+      const bytes = await retryTtsW(eng, async () => {
+        if (eng === 'edge') return edgeSynthW(text, voice, format);
+        return azureSynthW(text, voice, format, env);
+      });
+      assertAudioW(bytes, eng);
       return new Response(bytes, { headers: { ...cors, 'content-type': format === 'wav' ? 'audio/wav' : 'audio/mpeg', 'cache-control': 'public, max-age=86400' } });
     } catch (e) { lastErr = String((e && e.message) || e); console.log('TTS ' + eng + ' 失败: ' + lastErr); }
   }
   return jsonResp({ error: 'TTS 失败', detail: lastErr }, 502, cors);
+}
+
+async function retryTtsW(engine, synth) {
+  let lastError;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const bytes = await synth();
+      assertAudioW(bytes, engine);
+      return bytes;
+    } catch (error) {
+      lastError = error;
+      if (attempt === 2) break;
+      const delay = 250 * (2 ** attempt);
+      console.log(`TTS ${engine} 第 ${attempt + 1} 次失败，${delay}ms 后重试`);
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+  }
+  throw lastError || new Error(engine + ' 合成失败');
+}
+
+function assertAudioW(bytes, engine) {
+  const size = bytes && (bytes.byteLength || bytes.length);
+  if (!size) throw new Error(engine + ' 返回空音频');
 }
 
 // ============================ VAPID（无 payload 推送，仅需 JWT 鉴权）============================
@@ -646,6 +651,5 @@ function sse(obj) { return 'data: ' + JSON.stringify(obj) + '\n\n'; }
 function jsonResp(o, status, cors) { return new Response(JSON.stringify(o), { status, headers: { ...(cors || {}), 'content-type': 'application/json; charset=utf-8' } }); }
 function baseName(p) { if (!p) return ''; return p.replace(/[\/\\]+$/, '').split(/[\/\\]/).pop(); }
 function clip(s, n) { s = (s || '').toString(); return s.length > n ? s.slice(0, n) + '…' : s; }
-function b64ToBytes(b64) { const bin = atob(b64); const a = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) a[i] = bin.charCodeAt(i); return a; }
 function b64urlStr(s) { return b64urlBytes(new TextEncoder().encode(s)); }
 function b64urlBytes(bytes) { let bin = ''; for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]); return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); }

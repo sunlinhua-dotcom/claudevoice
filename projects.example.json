@@ -1,8 +1,8 @@
 {
   "_说明": "可选覆盖。复制为 projects.json。键 = 项目目录名(cwd 最后一段)或完整 cwd。不配置也行——已知项目有内置中文名+读音(见 server.js 的 DEFAULT_PROJECTS)，未知项目自动拆词朗读。",
-  "_字段": "name=屏幕显示名(可中文)  say=TTS 实际念的读音(中文或能读对的英文)  voice=指定音色(Mia/Dean/茉莉/白桦/Chloe/Milo/冰糖/苏打)  color=主题色",
+  "_字段": "name=屏幕显示名(可中文)  say=TTS 实际念的读音(中文或英文)  voice=指定音色(茉莉/白桦/冰糖/苏打)  color=主题色",
 
-  "my-web-app": { "name": "我的网站", "say": "My Web App", "voice": "Dean", "color": "#34d399" },
-  "api-service": { "name": "接口服务", "say": "API Service", "voice": "Milo" },
+  "my-web-app": { "name": "我的网站", "say": "My Web App", "voice": "白桦", "color": "#34d399" },
+  "api-service": { "name": "接口服务", "say": "API Service", "voice": "苏打" },
   "docs-site": { "name": "文档站", "say": "Docs Site", "voice": "茉莉" }
 }

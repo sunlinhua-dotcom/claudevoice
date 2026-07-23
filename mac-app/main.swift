@@ -12,25 +12,68 @@ func appLog(_ s: String) {
     } else { try? line.write(toFile: p, atomically: true, encoding: .utf8) }
 }
 
-func appConfig() -> (base: String, token: String) {
-    let p = (NSHomeDirectory() as NSString).appendingPathComponent(".claude/claudevoice-app.json")
-    if let d = try? Data(contentsOf: URL(fileURLWithPath: p)),
-       let j = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any] {
-        return ((j["base"] as? String) ?? "", (j["token"] as? String) ?? "")
+struct AppConfig {
+    let base: String
+    let token: String
+    let panelToken: String
+    let relay: String
+}
+
+func relayURL(fromBase base: String) -> String {
+    guard var parts = URLComponents(string: base),
+          parts.scheme == "https", parts.host != nil else { return "" }
+    parts.scheme = "wss"
+    parts.path = "/ws"
+    parts.query = nil
+    parts.fragment = nil
+    return parts.string ?? ""
+}
+
+func appConfig() -> AppConfig {
+    let claudeDir = (NSHomeDirectory() as NSString).appendingPathComponent(".claude")
+    try? FileManager.default.createDirectory(atPath: claudeDir, withIntermediateDirectories: true)
+    let appPath = (claudeDir as NSString).appendingPathComponent("claudevoice-app.json")
+    if let data = try? Data(contentsOf: URL(fileURLWithPath: appPath)),
+       let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+       let base = json["base"] as? String, !base.isEmpty {
+        return AppConfig(
+            base: base,
+            token: (json["token"] as? String) ?? "",
+            panelToken: (json["panelToken"] as? String) ?? "",
+            relay: (json["relay"] as? String) ?? ""
+        )
     }
-    return ("", "")
+
+    // 首次双击 App 时，从 hook 配置自动派生播报配置，不再要求手写第二份 JSON。
+    let hookPath = (claudeDir as NSString).appendingPathComponent("claudevoice.json")
+    if let data = try? Data(contentsOf: URL(fileURLWithPath: hookPath)),
+       let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+       let hookURL = json["url"] as? String, !hookURL.isEmpty {
+        let base = hookURL.hasSuffix("/hook") ? String(hookURL.dropLast(5)) : hookURL
+        let token = (json["secret"] as? String) ?? ""
+        let relay = relayURL(fromBase: base)
+        let generated: [String: Any] = ["base": base, "token": token, "panelToken": "", "relay": relay]
+        if let output = try? JSONSerialization.data(withJSONObject: generated, options: [.prettyPrinted, .sortedKeys]) {
+            try? output.write(to: URL(fileURLWithPath: appPath), options: .atomic)
+            chmod(appPath, 0o600)
+            appLog("derived app config from claudevoice.json")
+        }
+        return AppConfig(base: base, token: token, panelToken: "", relay: relay)
+    }
+    appLog("no app or hook config found; TTS and relay disabled until setup")
+    return AppConfig(base: "", token: "", panelToken: "", relay: "")
 }
 
 let KICON: [String: String] = ["done": "✅", "waiting": "⏳", "permission": "🔐", "notification": "🔔", "subagent": "🧩"]
 let KLABEL: [String: String] = ["done": "已完成", "waiting": "等待输入", "permission": "需要授权", "notification": "通知", "subagent": "子任务"]
 
-// 串行播放器：提示音 + MiMo 语音，顺序播、不重叠
+// 串行播放器：提示音 + Edge/Azure 语音，顺序播、不重叠
 final class Player {
     let queue = OperationQueue()
     var muted = false
     var idle = true   // 队列空闲标志：一波密集事件里只在第一条放音效，避免音效连发像警报
-    let cfg: (base: String, token: String)
-    init(_ c: (base: String, token: String)) { cfg = c; queue.maxConcurrentOperationCount = 1 }
+    let cfg: AppConfig
+    init(_ c: AppConfig) { cfg = c; queue.maxConcurrentOperationCount = 1 }
 
     func enqueue(_ ev: [String: Any], delete path: String?) {
         queue.addOperation { [weak self] in
@@ -70,6 +113,7 @@ final class Player {
         r.httpMethod = "POST"
         r.setValue("application/json", forHTTPHeaderField: "Content-Type")
         r.setValue(cfg.token, forHTTPHeaderField: "X-CV-Token")
+        r.setValue(cfg.token, forHTTPHeaderField: "X-CV-Secret")
         r.httpBody = try? JSONSerialization.data(withJSONObject: ["text": text, "voice": voice, "style": style, "format": "mp3"])
         let sem = DispatchSemaphore(value: 0); var out: Data?
         URLSession.shared.dataTask(with: r) { d, resp, _ in
@@ -121,7 +165,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var pairedDeviceCount = 0
     private var lastInjectedText = "——"
     private var relayUrl: String {
-        get { RelayClient.resolveRelayURL(defaults.string(forKey: "relayUrl")) }
+        get { RelayClient.resolveRelayURL(defaults.string(forKey: "relayUrl"), configured: cfg.relay) }
         set { defaults.set(newValue, forKey: "relayUrl") }
     }
 
@@ -256,7 +300,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let devices = NSMenuItem(title: "已配对设备：\(pairedDeviceCount)", action: nil, keyEquivalent: ""); devices.isEnabled = false; menu.addItem(devices)
         let last = NSMenuItem(title: "最近注入：\(shortMenuText(lastInjectedText, limit: 42))", action: nil, keyEquivalent: ""); last.isEnabled = false; menu.addItem(last)
         let llm = NSMenuItem(title: "标点纠错：\(llmOn ? "开" : "关")", action: #selector(toggleLlm), keyEquivalent: ""); llm.target = self; menu.addItem(llm)
-        let relay = NSMenuItem(title: "服务器地址：\(relayUrl)", action: #selector(editRelay), keyEquivalent: ""); relay.target = self; menu.addItem(relay)
+        let relayLabel = relayUrl.isEmpty ? "未配置（播报正常）" : relayUrl
+        let relay = NSMenuItem(title: "服务器地址：\(relayLabel)", action: #selector(editRelay), keyEquivalent: ""); relay.target = self; menu.addItem(relay)
         let reconnect = NSMenuItem(title: "重新连接", action: #selector(reconnectRelay), keyEquivalent: "r"); reconnect.target = self; menu.addItem(reconnect)
         menu.addItem(.separator())
 
@@ -286,11 +331,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
     @objc func toggleMute() { player.muted.toggle() }
     @objc func testSpeak() {
-        let ev: [String: Any] = ["speak": "这是一条测试播报，语音清晰、顺序播放。", "voice": "mimo_default", "style": "语气自然。", "kind": "done", "project": "测试", "ts": Date().timeIntervalSince1970 * 1000, "detail": "点菜单里的测试播报触发。"]
+        let ev: [String: Any] = ["speak": "这是一条测试播报，语音清晰、顺序播放。", "voice": "茉莉", "style": "语气自然。", "kind": "done", "project": "测试", "ts": Date().timeIntervalSince1970 * 1000, "detail": "点菜单里的测试播报触发。"]
         recordRecent(ev); player.enqueue(ev, delete: nil)
     }
     @objc func openPanel() {
-        if let u = URL(string: cfg.base + "/?token=" + cfg.token) { NSWorkspace.shared.open(u) }
+        let token = cfg.panelToken.isEmpty ? cfg.token : cfg.panelToken
+        if let u = URL(string: cfg.base + "/?token=" + token) { NSWorkspace.shared.open(u) }
     }
     func loginOn() -> Bool { if #available(macOS 13.0, *) { return SMAppService.mainApp.status == .enabled }; return false }
     @objc func toggleLogin() {
@@ -321,6 +367,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func setupRemoteInput() {
+        guard !relayUrl.isEmpty else {
+            remoteConnectionTitle = "状态：中继未配置（播报不受影响）"
+            remotePeerTitle = "对端：远程输入已停用"
+            appLog("remote input disabled: no relay configured")
+            return
+        }
         relayClient.macId = MacIdentity.current
         relayClient.onState = { [weak self] state in self?.handleRelayState(state) }
         relayClient.onEvent = { [weak self] event in self?.handleRelayEvent(event) }
@@ -432,6 +484,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc func openPairing() {
+        guard !relayUrl.isEmpty else {
+            let alert = NSAlert()
+            alert.messageText = "远程输入尚未配置"
+            alert.informativeText = "语音播报不受影响。部署 Worker 或在“服务器地址”中填写 wss://…/ws 后即可启用。"
+            alert.runModal()
+            return
+        }
         if pairingWC == nil {
             pairingWC = PairingWindowController(relay: relayClient, relayUrl: relayUrl)
         }
@@ -465,6 +524,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc func reconnectRelay() {
+        guard !relayUrl.isEmpty else {
+            appLog("remote input reconnect skipped: no relay configured")
+            return
+        }
         appLog("remote input reconnect requested")
         relayClient.connect(to: relayUrl)
     }

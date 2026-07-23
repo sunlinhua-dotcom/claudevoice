@@ -16,8 +16,7 @@ tag = "v1"
 new_sqlite_classes = ["Hub"]
 
 [vars]
-MIMO_BASE = "https://api.xiaomimimo.com/v1"
-MIMO_MODEL = "mimo-v2.5-tts"
-MIMO_VOICE = "mimo_default"
+TTS_ENGINE = "edge"
+TTS_VOICE = "茉莉"
 USER_NAME = "Dev"
 USER_ALIASES = ""

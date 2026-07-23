@@ -3,7 +3,7 @@
  * edge-tts.js — 微软 Edge「大声朗读」在线神经语音（免 key、免费、中英双优）
  *
  * 纯 Node 内置模块（tls + crypto），手写 WebSocket 握手。
- * 用作 ClaudeVoice 的首选 TTS 引擎，失败由调用方回落到 Azure / MiMo。
+ * 用作 ClaudeVoice 的首选 TTS 引擎，失败由调用方回落到 Azure。
  *
  * 关键（2026 起的反滥用要求，缺一即 403）：
  *   - Sec-MS-GEC：时间派生的 SHA-256 token（按 5 分钟取整）
@@ -20,8 +20,8 @@ const CHROMIUM = '143.0.0.0';
 const HOST = 'speech.platform.bing.com';
 const PATH = '/consumer/speech/synthesize/readaloud/edge/v1';
 
-// 项目内 4 个音色（MiMo 名）→ Edge 神经语音（与 Azure 同一套目录，男女保持一致）。
-// 仅用 Edge 端点实测可用的 zh-CN 音色；它们读中文为母语、嵌入的英文项目名/工具名也明显比 MiMo 准。
+// 项目内 4 个显示名 → Edge 神经语音（与 Azure 同一套目录，男女保持一致）。
+// 仅用 Edge 端点实测可用的 zh-CN 音色；它们读中文为母语，也能处理嵌入的英文项目名/工具名。
 const VOICE_MAP = {
   '茉莉': 'zh-CN-XiaoxiaoNeural', // f
   '冰糖': 'zh-CN-XiaoyiNeural',   // f

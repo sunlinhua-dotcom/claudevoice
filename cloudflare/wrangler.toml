@@ -24,9 +24,8 @@ new_sqlite_classes = ["Hub"]
 
 # 非敏感配置（敏感项用 wrangler secret put）
 [vars]
-MIMO_BASE = "https://api.xiaomimimo.com/v1"
-MIMO_MODEL = "mimo-v2.5-tts"
-MIMO_VOICE = "mimo_default"
+TTS_ENGINE = "edge"
+TTS_VOICE = "茉莉"
 USER_NAME = "Dev"
 USER_ALIASES = ""
 # 手机面板解锁密码（输对就换成真 token 种 cookie，免去手输令牌）。

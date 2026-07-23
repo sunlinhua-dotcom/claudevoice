@@ -397,7 +397,7 @@ function saveS(){ localStorage.setItem('cv_settings', JSON.stringify(S)); }
 var VOVR = JSON.parse(localStorage.getItem('cv_voices')||'{}');  // 项目→音色 覆盖
 function saveVOVR(){ localStorage.setItem('cv_voices', JSON.stringify(VOVR)); }
 
-var CFG = { voicePool:[{name:'Mia',gender:'f'},{name:'Dean',gender:'m'}], userName:'Dev', defaultVoice:'Mia', vapidPublic:'' };
+var CFG = { voicePool:[{name:'茉莉',gender:'f'},{name:'白桦',gender:'m'},{name:'冰糖',gender:'f'},{name:'苏打',gender:'m'}], userName:'Dev', defaultVoice:'茉莉', vapidPublic:'' };
 var SEEN = {};  // projectKey → {name, color, voice}
 
 /* =========================================================

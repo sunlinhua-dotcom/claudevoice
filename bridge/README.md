@@ -33,7 +33,7 @@ index.mjs + router.mjs ──► sessions.mjs（projects/state/队列）
 要求 Node.js >= 18、已安装并登录 `claude`、已安装 PM2。语音功能还要求系统可执行 `ffmpeg`；缺失时进程仍健康运行，并会在收到语音时提示用户。直接依赖只有飞书官方 SDK。
 
 ```bash
-cd /Volumes/ProjectsAPFS/CLAUDEVOICE/bridge
+cd ClaudeVoice/bridge
 cp .env.example .env
 # 填入真实配置；不要把 .env 提交到版本控制
 
@@ -78,7 +78,7 @@ npm run test:ui2-lark       # 真发 queued/running/permission/voice/help/done/f
 ```bash
 pm2 stop rv-feishu
 pm2 delete rv-feishu
-pm2 start /Volumes/ProjectsAPFS/CLAUDEVOICE/bridge/index.mjs --name cc-bridge
+pm2 start "$PWD/index.mjs" --name cc-bridge
 pm2 save
 pm2 ls
 pm2 logs cc-bridge --lines 100
