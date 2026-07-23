@@ -26,8 +26,9 @@ new_sqlite_classes = ["Hub"]
 [vars]
 TTS_ENGINE = "edge"
 TTS_VOICE = "茉莉"
-USER_NAME = "Dev"
-USER_ALIASES = ""
+# 播报称呼个性化（可选，属个人信息，不放进仓库）：
+#   wrangler secret put USER_NAME      # 播报时称呼你的名字（默认 Dev）
+#   wrangler secret put USER_ALIASES   # 备用称呼，逗号分隔，随机轮换
 # 手机面板解锁密码（输对就换成真 token 种 cookie，免去手输令牌）。
 # 不要在此处硬编码密码——请用 Cloudflare secret 设置：
 #   wrangler secret put UNLOCK_PASSWORD
