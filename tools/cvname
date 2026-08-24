@@ -6,6 +6,10 @@
 #   cvname SUZHOUHOU 苏州侯        改读音（显示名不变）
 #   cvname SUZHOUHOU 苏州侯 苏州后  改读音 + 显示名
 #   cvname -d SUZHOUHOU          删掉热改，回到内置种子
+#   cvname pending               列出「读音表里没有、正在等你拍板」的新项目
+#   cvname pending clear         清空待确认清单
+#
+# 新项目第一次播报时，飞书机器人会主动私信问你该怎么念；定了名待确认自动消失。
 #
 # say 只要读音对就行，用同音汉字当注音完全没问题（TTS 是中文音色，念汉字最准）。
 set -euo pipefail
@@ -15,6 +19,25 @@ TOKEN="$(node -e 'try{const j=JSON.parse(require("fs").readFileSync(process.argv
 [ -n "$BASE" ] || { echo "✗ 读不到 $CFG，无法确定 Worker 地址"; exit 1; }
 
 post() { curl -sS -X POST "$BASE/names" -H 'content-type: application/json' -H "x-cv-secret: $TOKEN" -d "$1"; }
+
+if [ "${1:-}" = "pending" ]; then
+  if [ "${2:-}" = "clear" ]; then
+    curl -sS -X POST "$BASE/pending" -H 'content-type: application/json' -H "x-cv-secret: $TOKEN" -d '{"clear":"*"}' \
+    | node -e 'let s="";process.stdin.on("data",c=>s+=c).on("end",()=>{const j=JSON.parse(s);console.log(j.ok?"✓ 已清空 "+(j.cleared||0)+" 条":"✗ "+s)})'
+    exit 0
+  fi
+  curl -sS "$BASE/pending" -H "x-cv-secret: $TOKEN" | node -e '
+    let s=""; process.stdin.on("data",c=>s+=c).on("end",()=>{
+      const j=JSON.parse(s); const rows=Object.values(j||{});
+      if(!rows.length){console.log("（没有待确认的项目，所有播报过的项目都有读音了）");return;}
+      rows.sort((a,b)=>b.lastTs-a.lastTs);
+      console.log("以下项目还没定读音，现在念的是兜底猜的：\n");
+      for(const r of rows)
+        console.log("  "+String(r.key).padEnd(22)+"现在念: "+String(r.guess).padEnd(18)+"播过 "+r.count+" 次\n"+" ".repeat(4)+r.cwd);
+      console.log("\n定读音：cvname <项目名> <读音>");
+    })'
+  exit 0
+fi
 
 if [ "${1:-}" = "-d" ]; then
   [ -n "${2:-}" ] || { echo "用法: cvname -d <项目名>"; exit 1; }

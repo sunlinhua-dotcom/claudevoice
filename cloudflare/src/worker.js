@@ -135,6 +135,7 @@ async function resolveProject(projectKey, env) {
     say: spaceCJK(o.say || o.name || humanizeName(projectKey)),
     color: o.color || null,
     voice: o.voice || null,
+    known: !!(ov[lk] || DEFAULT_PROJECTS[lk]),   // false = 读音是猜的，要找用户确认
   };
 }
 
@@ -190,6 +191,17 @@ export default {
       if (!tokOK) return jsonResp({ error: 'token required' }, 401, cors);
       return hub(env).fetch('https://do/latest');
     }
+    // 待确认读音：读音表里没有、只能靠兜底猜的项目，攒在这里等用户拍板。
+    if (p === '/pending') {
+      const secOK = env.HOOK_SECRET && req.headers.get('x-cv-secret') === env.HOOK_SECRET;
+      if (!tokOK && !secOK) return jsonResp({ error: 'token required' }, 401, cors);
+      if (req.method === 'POST') {
+        const r = await hub(env).fetch('https://do/pending', { method: 'POST', body: await req.text() });
+        return new Response(await r.text(), { status: r.status, headers: { ...cors, 'content-type': 'application/json' } });
+      }
+      return hub(env).fetch('https://do/pending');
+    }
+
     // 项目读音表热改：GET 看当前覆盖，POST 合并写入（say 为空串表示删掉这条覆盖）。
     if (p === '/names') {
       const secOK = env.HOOK_SECRET && req.headers.get('x-cv-secret') === env.HOOK_SECRET;
@@ -278,6 +290,15 @@ export class Hub {
     if (p === '/sse') return this.handleSSE();
     if (p === '/broadcast') { const ev = await req.json(); await this.broadcast(ev); return Response.json({ ok: true }); }
     if (p === '/subscribe') { const sub = await req.json(); await this.addSub(sub); return Response.json({ ok: true }); }
+    if (p === '/pending') {
+      const pend = (await this.state.storage.get('pending')) || {};
+      if (req.method !== 'POST') return Response.json(pend);
+      let body = {};
+      try { body = (await req.json()) || {}; } catch (_) {}
+      if (body.clear === '*') { await this.state.storage.put('pending', {}); return Response.json({ ok: true, cleared: Object.keys(pend).length }); }
+      if (body.clear) { delete pend[String(body.clear).toLowerCase()]; await this.state.storage.put('pending', pend); return Response.json({ ok: true }); }
+      return Response.json({ ok: false, error: 'nothing to do' });
+    }
     if (p === '/names') {
       const cur = (await this.state.storage.get('names')) || {};
       if (req.method !== 'POST') return Response.json(cur);
@@ -293,6 +314,11 @@ export class Hub {
         changed++;
       }
       await this.state.storage.put('names', cur);
+      // 定了名就不用再问了
+      const pend = (await this.state.storage.get('pending')) || {};
+      let dropped = 0;
+      for (const k of Object.keys(patch)) if (pend[k.toLowerCase()]) { delete pend[k.toLowerCase()]; dropped++; }
+      if (dropped) await this.state.storage.put('pending', pend);
       return Response.json({ ok: true, changed, count: Object.keys(cur).length });
     }
     if (p === '/latest') {
@@ -336,6 +362,39 @@ export class Hub {
       const delivery = { push: () => this.sendPush(ev), telegram: () => this.sendTelegram(ev), lark: () => this.sendLark(ev) };
       await Promise.allSettled(deliveryPlan(ev).map((name) => delivery[name]()));
     }
+    if (ev.unknownName && ev.projectKey && ev.projectKey !== 'unknown') {
+      try { await this.notePending(ev); } catch (_) {}
+    }
+  }
+
+  // 没进读音表的项目：记一笔，第一次见到时飞书私信问用户该怎么念。
+  async notePending(ev) {
+    const pend = (await this.state.storage.get('pending')) || {};
+    const k = String(ev.projectKey).toLowerCase();
+    const first = !pend[k];
+    pend[k] = {
+      key: ev.projectKey,
+      guess: ev.project,
+      cwd: ev.cwd || '',
+      count: ((pend[k] && pend[k].count) || 0) + 1,
+      firstTs: (pend[k] && pend[k].firstTs) || ev.ts,
+      lastTs: ev.ts,
+    };
+    await this.state.storage.put('pending', pend);
+    if (first) await this.askPronunciation(pend[k]);
+  }
+
+  async askPronunciation(item) {
+    const card = {
+      config: { wide_screen_mode: true },
+      header: { template: 'turquoise', title: { tag: 'plain_text', content: `🆕 新项目 ${item.key} · 该怎么念？` } },
+      elements: [
+        { tag: 'div', text: { tag: 'lark_md', content: `这个项目第一次播报，读音表里没有，我先按兜底规则念作 **${item.guess}**。` } },
+        { tag: 'div', text: { tag: 'lark_md', content: `告诉我正确读音就行，或者直接跑：\n\`cvname ${item.key} <读音>\`` } },
+        { tag: 'note', elements: [{ tag: 'plain_text', content: `目录 ${item.cwd || '(未知)'}　·　读音只要听着对，用同音汉字当注音即可` }] },
+      ],
+    };
+    await this.sendLarkCard(card);
   }
 
   larkText(ev) {
@@ -373,7 +432,9 @@ export class Hub {
     } catch (_) {}
     return '';
   }
-  async sendLark(ev) {
+  async sendLark(ev) { return this.sendLarkCard(this.larkCard(ev)); }
+
+  async sendLarkCard(card) {
     // 优先：自建应用机器人私信
     if (this.env.LARK_APP_ID && this.env.LARK_APP_SECRET && this.env.LARK_OPEN_ID) {
       const tok = await this.larkToken();
@@ -381,14 +442,14 @@ export class Hub {
       try {
         await fetch('https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=open_id', {
           method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer ' + tok },
-          body: JSON.stringify({ receive_id: this.env.LARK_OPEN_ID, msg_type: 'interactive', content: JSON.stringify(this.larkCard(ev)) }) });
+          body: JSON.stringify({ receive_id: this.env.LARK_OPEN_ID, msg_type: 'interactive', content: JSON.stringify(card) }) });
       } catch (_) {}
       return;
     }
     // 备选：自定义机器人 webhook
     const url = this.env.LARK_WEBHOOK_URL;
     if (!url) return;
-    const body = { msg_type: 'interactive', card: this.larkCard(ev) };
+    const body = { msg_type: 'interactive', card };
     if (this.env.LARK_WEBHOOK_SECRET) {
       const ts = Math.floor(Date.now() / 1000).toString();
       const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(ts + '\n' + this.env.LARK_WEBHOOK_SECRET), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
@@ -483,6 +544,8 @@ async function normalizeEvent(payload, env) {
     needsAction: kind === 'waiting' || kind === 'permission',
     silent: kind === 'subagent' && (env.CV_SUBAGENT || 'silent').toLowerCase() !== 'voice',
     project: proj.display, projectKey, cwd, color: proj.color || null,
+    unknownName: !proj.known,               // 读音表里没有，念法是兜底猜的
+
     voice: v.name, gender: v.gender,
     style: buildStyle(kind),
     title, detail: clip(detail, 240),

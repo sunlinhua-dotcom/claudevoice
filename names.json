@@ -3,8 +3,8 @@
 
   "CLAUDEVOICE":      { "name": "语音通知台",     "say": "Claude Voice" },
   "SUZHOUHOU":        { "name": "苏州逅 LOUNGE",  "say": "苏州逅 Lounge" },
-  "ACERGX10":         { "name": "ACERGX10",      "say": "宏碁 GX 10" },
-  "ACERGX10-archive": { "name": "ACERGX10 归档", "say": "宏碁 GX 10 归档" },
+  "ACERGX10":         { "name": "本地 Spark 算力", "say": "本地的 Spark 算力" },
+  "ACERGX10-archive": { "name": "Spark 算力归档",  "say": "本地的 Spark 算力 归档" },
   "shenhuaGOAL":      { "name": "申花球探",       "say": "申花球探" },
   "HANGZHOU":         { "name": "HANGZHOU",      "say": "杭州" },
   "HZ LIB":           { "name": "杭州星光影视",   "say": "杭州星光影视" },
