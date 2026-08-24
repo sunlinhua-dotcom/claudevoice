@@ -1,9 +1,5 @@
-// 文字注入：用 CGEvent 把识别出的文字注入到当前焦点窗口。
-// 这一步是核心——文字（键盘事件）经 UU 远程转发到被控主机，比音频转发稳得多。
-//
-// 实现思路：遍历字符串的 Unicode 标量，逐个用 CGEvent_KEYBOARD 触发。
-// 基本多文种平面（BMP）内的字符用 keycode 0 + Unicode payload；
-// 代理对（emoji 等）按 UTF-16 代理对发送。
+// 文字注入：先把完整文本写入剪贴板，再对确认仍在前台的目标 App 发送一次 Cmd+V。
+// 单次粘贴由目标输入框原子消费，避免分块 Unicode 键盘事件与异步受控输入框竞争光标状态。
 
 import AppKit
 import ApplicationServices
@@ -23,7 +19,7 @@ final class TextInjector {
     private var lastPromptAt: Date?
 
     /// 把整段文字送达，返回真实结果：
-    ///  - 焦点是可编辑文本框 / 前台是远程桌面类 App，且键盘事件确实发出 → .typed
+    ///  - 焦点是可编辑文本框，且单次 Cmd+V 键盘事件确实发出 → .typed
     ///  - 没权限 / Secure Input / 没输入框 / 打字失败 → 退剪贴板 .copied
     ///  - 连剪贴板都失败 → .failed
     @discardableResult
@@ -36,13 +32,17 @@ final class TextInjector {
         let secure = IsSecureEventInputEnabled()
         let st = shouldType()
         let fm = NSWorkspace.shared.frontmostApplication
+        let targetPID = fm?.processIdentifier
         rvLog("inject「\(text.prefix(16))」 AX授权=\(trusted) SecureInput=\(secure) shouldType=\(st) 前台=\(fm?.localizedName ?? "?")/\(fm?.bundleIdentifier ?? "?")")
         // 没有辅助功能权限：CGEvent 会被静默丢弃，别假装打字成功（内容已在剪贴板）。
         guard trusted else { promptAccessibilityThrottled(); rvLog(" → 剪贴板（无 AX 授权）"); return copied ? .copied : .failed }
         // Secure Input（密码/安全输入框）开启时，合成键盘事件会被系统静默吞掉 → 仅剪贴板。
         if secure { rvLog(" → 剪贴板（Secure Input 开启）"); return copied ? .copied : .failed }
-        // 有可编辑焦点就直接打字（顺手），否则等用户点「粘贴」。
-        if st, cgType(text) { rvLog(" → 已打字 ✅"); return .typed }
+        // 有可编辑焦点时送达；否则等用户点「粘贴」。长短文本都只走一次 Cmd+V，
+        // 不保留任何 Unicode 分块事件路径，避免同类乱序再次出现。
+        if st, copied, postCommandPaste(expectedFrontmostPID: targetPID) {
+            rvLog(" → 已单次粘贴 ✅"); return .typed
+        }
         rvLog(" → 剪贴板（shouldType=\(st)，没识别到可输入焦点/远程前台）")
         return copied ? .copied : .failed
     }
@@ -94,19 +94,20 @@ final class TextInjector {
         return pb.setString(text, forType: .string)
     }
 
-    /// 用 CGEvent 把整段文字"打"到当前焦点窗口（经远程转发可落到被控主机）。
-    /// 返回 false = 事件源/事件创建失败（注入未发生），让上层退回剪贴板。
-    private func cgType(_ text: String) -> Bool {
-        guard let src = CGEventSource(stateID: .hidSystemState),
-              let event = CGEvent(keyboardEventSource: src, virtualKey: 0, keyDown: true) else { return false }
-        // 按 Unicode 标量边界分块（每块 ≤10 个 UTF-16 单元），保证代理对（emoji 等）不被切断。
-        for units in chunkedScalars(text, size: 10) {
-            event.keyboardSetUnicodeString(stringLength: units.count, unicodeString: units)
-            event.type = .keyDown
-            event.post(tap: .cgSessionEventTap)
-            event.type = .keyUp
-            event.post(tap: .cgSessionEventTap)
-        }
+    /// 对同一个前台 App 发送一次 Cmd+V，并给目标输入框短暂时间提交粘贴状态。
+    private func postCommandPaste(expectedFrontmostPID: pid_t?) -> Bool {
+        guard let expectedFrontmostPID else { return false }
+        // NSPasteboard 写入是同步的；短暂让出主线程，避免目标 App 在变更通知前收到 Cmd+V。
+        Thread.sleep(forTimeInterval: 0.03)
+        guard NSWorkspace.shared.frontmostApplication?.processIdentifier == expectedFrontmostPID,
+              let src = CGEventSource(stateID: .hidSystemState),
+              let down = CGEvent(keyboardEventSource: src, virtualKey: 9, keyDown: true),
+              let up = CGEvent(keyboardEventSource: src, virtualKey: 9, keyDown: false) else { return false }
+        down.flags = .maskCommand
+        up.flags = .maskCommand
+        down.post(tap: .cgSessionEventTap)
+        up.post(tap: .cgSessionEventTap)
+        Thread.sleep(forTimeInterval: 0.15)
         return true
     }
 
@@ -117,17 +118,11 @@ final class TextInjector {
         guard AXIsProcessTrusted() else { promptAccessibilityThrottled(); return .failed }
         if IsSecureEventInputEnabled() { return .failed }
         // "paste" = 无条件 Cmd+V（卡片按钮，用户已手动聚焦）；
-        // "autopaste" = 仅在有可编辑焦点/远程桌面前台时才 Cmd+V（自动，像文字注入那样；没合适焦点就不贴，留给按钮）。
+        // "autopaste" = 仅在有可编辑焦点/常规前台 App 时才 Cmd+V（自动，像文字注入那样；没合适焦点就不贴，留给按钮）。
         if k == "paste" || k == "autopaste" {
             if k == "autopaste" && !shouldType() { return .copied }   // 没焦点：内容已在剪贴板，等用户点「粘贴」
-            guard let src = CGEventSource(stateID: .hidSystemState),
-                  let down = CGEvent(keyboardEventSource: src, virtualKey: 9, keyDown: true),   // V = 9
-                  let up = CGEvent(keyboardEventSource: src, virtualKey: 9, keyDown: false) else { return .failed }
-            down.flags = .maskCommand
-            up.flags = .maskCommand
-            down.post(tap: .cgSessionEventTap)
-            up.post(tap: .cgSessionEventTap)
-            return .typed
+            let targetPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
+            return postCommandPaste(expectedFrontmostPID: targetPID) ? .typed : .failed
         }
         let map: [String: CGKeyCode] = ["enter": 36, "return": 36, "tab": 48, "escape": 53, "esc": 53]
         guard let code = map[k],
@@ -162,20 +157,4 @@ final class TextInjector {
         }
     }
 
-    /// 按 Unicode 标量边界把字符串切成若干 UTF-16 单元块，每块不超过 size 个单元，
-    /// 且任何一个标量（含 2 单元的代理对）都完整落在同一块内。
-    private func chunkedScalars(_ text: String, size: Int) -> [[UInt16]] {
-        var chunks: [[UInt16]] = []
-        var buf: [UInt16] = []
-        for scalar in text.unicodeScalars {
-            let units = Array(String(scalar).utf16) // 1 或 2 个单元，始终是完整代理对
-            if !buf.isEmpty && buf.count + units.count > size {
-                chunks.append(buf)
-                buf.removeAll(keepingCapacity: true)
-            }
-            buf.append(contentsOf: units)
-        }
-        if !buf.isEmpty { chunks.append(buf) }
-        return chunks
-    }
 }

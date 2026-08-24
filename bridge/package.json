@@ -20,6 +20,7 @@
     "test:ui2-lark": "node test/send-ui2-cards.mjs",
     "test:input-clipboard": "node test/input-clipboard-e2e.mjs",
     "test:input-relay": "node test/relay-input-smoke.mjs",
+    "test:text-inject-order": "node test/text-inject-order-e2e.mjs",
     "test:input-lark": "node test/send-input-card.mjs",
     "test:attachment-clipboard": "node test/attachment-clipboard-e2e.mjs",
     "test:attachment-paste": "node test/attachment-paste-smoke.mjs",
