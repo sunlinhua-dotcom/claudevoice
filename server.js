@@ -53,15 +53,8 @@ const VOICE_POOL = [
 ];
 const VOICE_GENDER = VOICE_POOL.reduce((m, v) => (m[v.name] = v.gender, m), {});
 
-// 播报里跟在名字后的尊称，每次随机抽一个（都是对老板的不同叫法）。
-const HONORIFICS = [
-  '老板', '老大', '老总', '大老板', '我的老板',
-  '老板大人', '尊敬的老板', '老板中的老板', '头儿', '领导',
-  '一把手', '董事长', '总裁', '掌柜的', '东家',
-  '当家的', '当家人', '我们老大', '我的顶头上司', '话事人',
-];
-
-// 用户认可的几种称呼：主名 userName + 备用别名 userAliases，每次随机抽一个当开头。
+// 用户只认这两个称呼：主名 userName（布莱特）+ 别名 userAliases（老孙），每次随机抽一个。
+// 2026-08-25 用户明确要求：不要再加"老板/老大"之类的尊称后缀。
 function userAddresses() {
   return [CFG.userName, ...CFG.userAliases];
 }
@@ -285,7 +278,7 @@ function assignVoice(projectKey, override) {
 // 统一格式：中文名 + 敬称 + 目录名 + 任务状态 + 具体描述
 function buildSpeak(kind, U, proj, tool, detail) {
   if (kind === 'done') return buildDoneSpeak(U, proj, detail);
-  const g = `${pick(userAddresses())}，${pick(HONORIFICS)}，`;
+  const g = `${pick(userAddresses())}，`;
   const P = {
     waiting: [
       `${g}目录 ${proj} 正在等你输入，回去看一下吧。`,
@@ -309,7 +302,7 @@ function isMostlyChinese(s) {
   return cjk >= Math.max(4, latin);
 }
 function buildDoneSpeak(U, proj, detail) {
-  const g = `${pick(userAddresses())}，${pick(HONORIFICS)}，`;
+  const g = `${pick(userAddresses())}，`;
   const text = detail || '';
   const sum = (text && text !== '本轮任务结束。' && isMostlyChinese(text)) ? pickSummary(text, 150) : '';
   if (!sum || detail === '本轮任务结束。') {

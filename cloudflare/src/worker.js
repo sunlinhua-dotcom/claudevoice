@@ -23,15 +23,8 @@ const VOICE_POOL = [
 ];
 const VOICE_GENDER = VOICE_POOL.reduce((m, v) => (m[v.name] = v.gender, m), {});
 
-// 播报里跟在名字后的尊称，每次随机抽一个（都是对老板的不同叫法，与 server.js 同步）。
-const HONORIFICS = [
-  '老板', '老大', '老总', '大老板', '我的老板',
-  '老板大人', '尊敬的老板', '老板中的老板', '头儿', '领导',
-  '一把手', '董事长', '总裁', '掌柜的', '东家',
-  '当家的', '当家人', '我们老大', '我的顶头上司', '话事人',
-];
-
-// 用户认可的几种称呼：主名 USER_NAME + 备用别名 USER_ALIASES（逗号分隔），每次随机抽一个当开头。
+// 用户只认这两个称呼：主名 USER_NAME（布莱特）+ 别名 USER_ALIASES（老孙），每次随机抽一个。
+// 2026-08-25 用户明确要求：不要再加"老板/老大"之类的尊称后缀（与 server.js 同步）。
 function userAddresses(env, U) {
   const aliases = String(env.USER_ALIASES || '').split(/[，,]/).map((s) => s.trim()).filter(Boolean);
   return [U, ...aliases];
@@ -593,7 +586,7 @@ async function aiSummarize(env, text) {
 // 统一格式：中文名 + 敬称 + 目录名 + 任务状态 + 具体描述
 async function buildSpeak(env, kind, U, proj, tool, detail) {
   if (kind === 'done') return await buildDoneSpeak(env, U, proj, detail);
-  const g = `${pick(userAddresses(env, U))}，${pick(HONORIFICS)}，`;
+  const g = `${pick(userAddresses(env, U))}，`;
   const P = {
     waiting: [
       `${g}目录 ${proj} 正在等你输入，回去看一下吧。`,
@@ -611,7 +604,7 @@ async function buildSpeak(env, kind, U, proj, tool, detail) {
   return pick(P[kind] || P.notification);
 }
 async function buildDoneSpeak(env, U, proj, detail) {
-  const g = `${pick(userAddresses(env, U))}，${pick(HONORIFICS)}，`;
+  const g = `${pick(userAddresses(env, U))}，`;
   const raw = (detail || '').trim();
   if (!raw || raw === '本轮任务结束。') {
     return pick([

@@ -87,7 +87,7 @@ final class Player {
         if muted { return }
         guard let speak = ev["speak"] as? String, !speak.isEmpty else { return }
         let knd = ev["kind"] as? String ?? ""
-        if idle { idle = false; appLog("音效播放 [\(knd)]"); chime(knd) }   // 一波里只第一条放音效
+        if idle { idle = false; chime(knd, ev["projectKey"] as? String ?? "") }   // 一波里只第一条放音效
         else { appLog("音效跳过·密集事件 [\(knd)]") }
         guard let data = fetchTTS(text: speak, voice: ev["voice"] as? String ?? "", style: ev["style"] as? String ?? "") else { return }
         let tmp = NSTemporaryDirectory() + "cv_\(UUID().uuidString).mp3"
@@ -95,11 +95,28 @@ final class Player {
         afplay(tmp)
         try? FileManager.default.removeItem(atPath: tmp)
     }
-    private func chime(_ kind: String) {
-        let file = (kind == "done" || kind == "subagent") ? "chime-done.wav" : "chime-alert.wav"
-        let p = (Bundle.main.resourcePath ?? "") + "/" + file
-        if FileManager.default.fileExists(atPath: p) { afplay(p) }
-        else { afplay("/System/Library/Sounds/Hero.aiff") }   // 兜底
+    // 项目名里可能有空格/斜杠，落盘时统一换成下划线（与 tools/sfx/cv-sfx 的 cue_path 一致）
+    private func cueSlug(_ s: String) -> String {
+        return String(s.map { c in
+            (c.isLetter || c.isNumber || c == "-" || c == "_" || c == ".") ? c : "_"
+        })
+    }
+    // 找音效的顺序：项目专属(分完成/提醒) → 项目专属(不分) → App 内置 → 系统音
+    private func chime(_ kind: String, _ projectKey: String) {
+        let fm = FileManager.default
+        let suffix = (kind == "done" || kind == "subagent") ? "done" : "alert"
+        var candidates: [String] = []
+        if !projectKey.isEmpty {
+            let dir = NSHomeDirectory() + "/.claude/cv-cues/" + cueSlug(projectKey)
+            candidates += [dir + "-" + suffix + ".wav", dir + ".wav"]
+        }
+        candidates.append((Bundle.main.resourcePath ?? "") + "/chime-" + suffix + ".wav")
+        for c in candidates where fm.fileExists(atPath: c) {
+            appLog("音效播放 [\(kind)] \(URL(fileURLWithPath: c).lastPathComponent)")
+            afplay(c); return
+        }
+        appLog("音效播放 [\(kind)] 系统兜底")
+        afplay("/System/Library/Sounds/Hero.aiff")
     }
     private func afplay(_ path: String) {
         let p = Process()
