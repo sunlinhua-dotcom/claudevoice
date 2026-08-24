@@ -71,23 +71,44 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>CFBundleVersion</key><string>1</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>NSHighResolutionCapable</key><true/>
+  <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+  <key>LSApplicationCategoryType</key><string>public.app-category.productivity</string>
+  <key>CFBundleSupportedPlatforms</key><array><string>MacOSX</string></array>
+  <key>DTPlatformName</key><string>macosx</string>
+  <key>DTSDKName</key><string>macosx14.0</string>
 </dict></plist>
 PLIST
 
 echo "== 签名 =="
-# 优先用稳定的自签名证书签名；不可用时（包括 CI）回退 ad-hoc。
+# 优先 Developer ID：只有带 TeamIdentifier 的签名才拿得到系统通知权限，
+# 自签名会被 UNUserNotificationCenter 直接拒（Notifications are not allowed
+# for this application）。没有 Developer ID 时退回本地自签名，再退 ad-hoc。
+# 默认仍用本地自签名：换签名会让 macOS 的辅助功能 / 设备控制授权失配，
+# 每次启动都重新弹框要权限。而 Developer ID 只有在 App 也做了公证之后
+# 才换得到系统通知权限（实测未公证一样被拒），所以不值得默认切换。
+# 真要走原生通知：先 notarytool 公证，再 CV_USE_DEVID=1 ./build.sh。
+if [ "${CV_USE_DEVID:-0}" = "1" ]; then
+  DEVID="${CV_SIGN_ID:-$(security find-identity -v -p codesigning 2>/dev/null \
+    | grep -o '"Developer ID Application: [^"]*"' | head -1 | tr -d '"')}"
+else
+  DEVID=""
+fi
 RV_KEYCHAIN="$HOME/Library/Keychains/remotevoice-signing.keychain-db"
 RV_SIGN_ID="${RV_SIGN_ID:-RemoteVoice Local Signing}"
 RV_KCPASS="${RV_KCPASS:-rvlocal-signing}"
-if [ -f "$RV_KEYCHAIN" ]; then
-  security unlock-keychain -p "$RV_KCPASS" "$RV_KEYCHAIN" 2>/dev/null || true
-  security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$RV_KCPASS" "$RV_KEYCHAIN" >/dev/null 2>&1 || true
-fi
-if [ -f "$RV_KEYCHAIN" ] && codesign --force --deep --keychain "$RV_KEYCHAIN" --sign "$RV_SIGN_ID" --identifier com.claudevoice.app "$APP" 2>/dev/null; then
-  echo "  已用稳定自签名身份：$RV_SIGN_ID"
+if [ -n "$DEVID" ] && codesign --force --deep --sign "$DEVID" --identifier com.claudevoice.app "$APP" 2>/dev/null; then
+  echo "  已用 Developer ID 签名：$DEVID"
 else
-  echo "  稳定证书不可用，回退 ad-hoc"
-  codesign --force --deep --sign - --identifier com.claudevoice.app "$APP"
+  if [ -f "$RV_KEYCHAIN" ]; then
+    security unlock-keychain -p "$RV_KCPASS" "$RV_KEYCHAIN" 2>/dev/null || true
+    security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$RV_KCPASS" "$RV_KEYCHAIN" >/dev/null 2>&1 || true
+  fi
+  if [ -f "$RV_KEYCHAIN" ] && codesign --force --deep --keychain "$RV_KEYCHAIN" --sign "$RV_SIGN_ID" --identifier com.claudevoice.app "$APP" 2>/dev/null; then
+    echo "  没有 Developer ID，用稳定自签名身份：$RV_SIGN_ID（系统通知会不可用，退回自绘面板）"
+  else
+    echo "  稳定证书不可用，回退 ad-hoc（系统通知会不可用，退回自绘面板）"
+    codesign --force --deep --sign - --identifier com.claudevoice.app "$APP"
+  fi
 fi
 
 if [ "$NO_INSTALL" -eq 1 ]; then

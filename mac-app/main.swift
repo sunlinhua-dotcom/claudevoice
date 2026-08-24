@@ -171,6 +171,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func applicationDidFinishLaunching(_ n: Notification) {
         appLog("launched. base=\(cfg.base) tokenLen=\(cfg.token.count)")
+        NameAsk.shared.onPendingChanged = { [weak self] in self?.statusItem?.button?.needsDisplay = true }
+        NameAsk.shared.setup(base: cfg.base, token: cfg.token)
         migrateRemoteVoiceDefaultsIfNeeded()
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.imagePosition = .imageOnly
@@ -188,6 +190,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 try? FileManager.default.removeItem(atPath: path); return
             }
             self.recordRecent(ev)
+            NameAsk.shared.consider(ev)     // 没进读音表的新项目 → 弹通知问读音
             appLog("queued: \(ev["project"] ?? "?") \(ev["kind"] ?? "?")")
             self.player.enqueue(ev, delete: path)
         }
@@ -284,6 +287,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         menu.addItem(.separator())
 
+        if !NameAsk.shared.pending.isEmpty {
+            let n = NameAsk.shared.pending.count
+            let ask = NSMenuItem(title: "🆕 待定读音：\(n) 个，点这里设定…", action: #selector(askPendingName), keyEquivalent: "")
+            ask.target = self; menu.addItem(ask)
+            menu.addItem(.separator())
+        }
+
         let mute = NSMenuItem(title: player.muted ? "🔔 取消静音" : "🔕 静音", action: #selector(toggleMute), keyEquivalent: "")
         mute.target = self; menu.addItem(mute)
         let test = NSMenuItem(title: "▶ 测试播报", action: #selector(testSpeak), keyEquivalent: ""); test.target = self; menu.addItem(test)
@@ -329,6 +339,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let i = sender.tag
         if i >= 0 && i < recent.count { player.enqueue(recent[i], delete: nil) }
     }
+    @objc func askPendingName() { NameAsk.shared.askNext() }
     @objc func toggleMute() { player.muted.toggle() }
     @objc func testSpeak() {
         let ev: [String: Any] = ["speak": "这是一条测试播报，语音清晰、顺序播放。", "voice": "茉莉", "style": "语气自然。", "kind": "done", "project": "测试", "ts": Date().timeIntervalSince1970 * 1000, "detail": "点菜单里的测试播报触发。"]
