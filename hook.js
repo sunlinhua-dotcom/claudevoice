@@ -24,11 +24,15 @@ const { spawn } = require('child_process');
 // 读配置：优先环境变量，其次 ~/.claude/claudevoice.json
 let url = process.env.CLAUDEVOICE_URL || '';
 let secret = process.env.CLAUDEVOICE_SECRET || '';
+// 项目根目录清单：cwd 落在某个根下时，取「根的下一层」当项目名（子目录不再各自算一个项目）。
+// 支持在 ~/.claude/claudevoice.json 里用 projectRoots 配置；最长前缀优先。
+let projectRoots = [os.homedir(), path.join(os.homedir(), 'Desktop')];
 try {
   const cfgPath = path.join(os.homedir(), '.claude', 'claudevoice.json');
   const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
   url = url || cfg.url;
   secret = secret || cfg.secret || '';
+  if (Array.isArray(cfg.projectRoots) && cfg.projectRoots.length) projectRoots = cfg.projectRoots.slice();
 } catch (_) {}
 url = url || 'http://127.0.0.1:8787/hook';
 
@@ -46,6 +50,7 @@ function forward(body) {
   let obj;
   try { obj = JSON.parse(body || '{}'); } catch (_) { return postBody(body); }
   if (!obj.hook_event_name && process.argv[2]) obj.hook_event_name = process.argv[2];
+  try { obj.cv_project = resolveProjectKey(obj.cwd); } catch (_) {}   // 真正的项目名（本机能读文件系统，服务端读不到）
   try { nativeNotify(obj); } catch (_) {}   // Mac 原生横幅提醒（视觉）
 
   if (obj.hook_event_name === 'Stop' && obj.transcript_path && !obj.cv_preview) {
@@ -143,7 +148,8 @@ function nativeNotify(obj) {
   if (process.platform !== 'darwin') return;
   if (process.env.CLAUDEVOICE_NATIVE === '0') return;
   if (obj && obj.hook_event_name === 'SubagentStop') return;  // 子任务默认静音，不弹原生横幅
-  const proj = humanize(baseName((obj.cwd || '').toString())) || '项目';
+  const key = obj.cv_project || resolveProjectKey(obj.cwd);
+  const proj = (NAMES[key] && NAMES[key].name) || humanize(key) || '项目';
   const ev = obj.hook_event_name || '';
   const msg = (obj.message || '').toString().toLowerCase();
   let line = '🔔 有新信号', sound = 'Glass';
@@ -156,6 +162,90 @@ function nativeNotify(obj) {
     const c = spawn('osascript', ['-e', script], { detached: true, stdio: 'ignore' });
     c.on('error', () => {}); c.unref();
   } catch (_) {}
+}
+
+// 读音 / 显示名表（与 Worker 共用同一份 names.json，横幅显示中文名用）
+const NAMES = (() => {
+  try {
+    const t = JSON.parse(fs.readFileSync(path.join(__dirname, 'names.json'), 'utf8'));
+    const m = {};
+    for (const k of Object.keys(t)) if (k[0] !== '_') m[k.toLowerCase()] = t[k];
+    return new Proxy(m, { get: (o, k) => (typeof k === 'string' ? o[k.toLowerCase()] : undefined) });
+  } catch (_) { return {}; }
+})();
+
+// ---------- 项目名解析 ----------
+// cwd 的最后一段常常不是项目：scratchpad 临时目录、git worktree 代号、仓库子目录都会被误当成项目。
+// 顺序：scratchpad 还原 → worktree 回溯 → projectRoots 下一层 → 标记文件向上找 → basename 兜底。
+const PROJECT_MARKERS = ['.git', 'CLAUDE.md', '.claude', 'package.json', 'pyproject.toml', 'Cargo.toml', 'go.mod'];
+
+function resolveProjectKey(cwdRaw) {
+  let cwd = (cwdRaw || '').toString().replace(/[\/\\]+$/, '');
+  if (!cwd) return 'unknown';
+
+  // 1) Claude Code 的 scratchpad：/private/tmp/claude-<uid>/<编码过的项目路径>/<session>/scratchpad[/...]
+  //    编码把 '/' 和空格都换成了 '-'，直接解码有歧义，所以拿真实目录逐段贪婪匹配还原。
+  const sp = /^(?:\/private)?\/tmp\/claude-[^\/]*\/([^\/]+)\//.exec(cwd + '/');
+  if (sp && sp[1].indexOf('-') === 0) {
+    const real = decodeClaudePath(sp[1]);
+    if (real) return resolveProjectKey(real);
+  }
+
+  // 2) git worktree：<项目>/.claude-worktrees/<随机代号> → 回到 <项目>
+  const wt = cwd.indexOf('/.claude-worktrees/');
+  if (wt > 0) return resolveProjectKey(cwd.slice(0, wt));
+
+  // 3) 项目根清单：取「根的下一层」；最长前缀优先，这样 .../longterm 能盖住 .../
+  let best = '';
+  for (const r of projectRoots) {
+    const root = (r || '').toString().replace(/[\/\\]+$/, '');
+    if (!root) continue;
+    if ((cwd + '/').indexOf(root + '/') === 0 && root.length > best.length) best = root;
+  }
+  if (best) {
+    const rest = cwd.slice(best.length + 1);
+    if (rest) return rest.split('/')[0];
+  }
+
+  // 4) 向上找标记文件，取「最高」的那个（子包有 package.json 也不会盖过仓库根）
+  let hit = '';
+  let cur = cwd;
+  const stopAt = path.parse(cwd).root;
+  for (let i = 0; i < 8 && cur && cur !== stopAt; i++) {
+    for (const m of PROJECT_MARKERS) {
+      try { if (fs.existsSync(path.join(cur, m))) { hit = cur; break; } } catch (_) {}
+    }
+    const up = path.dirname(cur);
+    if (up === cur) break;
+    cur = up;
+  }
+  if (hit) return baseName(hit);
+
+  return baseName(cwd) || 'unknown';
+}
+
+// 把 "-Volumes-ProjectsAPFS-HZ-LIB" 这类编码路径还原成真实路径：
+// 逐段读真实目录做贪婪最长匹配，天然解决目录名里本来就带 '-' 或空格的歧义。
+function decodeClaudePath(enc) {
+  const toks = String(enc).split('-');
+  let i = toks[0] === '' ? 1 : 0;
+  let cur = '/';
+  while (i < toks.length) {
+    let children;
+    try { children = fs.readdirSync(cur); } catch (_) { break; }
+    let best = null, bestLen = 0;
+    for (const c of children) {
+      const parts = c.replace(/[ \/]/g, '-').split('-');
+      if (parts.length > toks.length - i || parts.length <= bestLen) continue;
+      let ok = true;
+      for (let k = 0; k < parts.length; k++) if (parts[k] !== toks[i + k]) { ok = false; break; }
+      if (ok) { best = c; bestLen = parts.length; }
+    }
+    if (!best) break;
+    cur = path.join(cur, best);
+    i += bestLen;
+  }
+  return cur === '/' ? '' : cur;
 }
 
 // 文件夹名拆词（与 server.js humanizeName 同）

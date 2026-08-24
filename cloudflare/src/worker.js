@@ -37,29 +37,102 @@ function userAddresses(env, U) {
   return [U, ...aliases];
 }
 
-// 内置「中文名 + TTS 读音」种子。name=屏幕显示；say=语音念的读音。
-const DEFAULT_PROJECTS = {
-  CLAUDEVOICE: { name: '语音通知台', say: 'Claude Voice' },
-  autoresearch: { name: '自动研究', say: 'Auto Research' },
-  'my-web-app': { name: '我的网站', say: 'My Web App' },
-  'api-service': { name: '接口服务', say: 'API Service' },
-  'docs-site': { name: '文档站', say: 'Docs Site' },
-};
+// 内置「中文名 + TTS 读音」种子表，与 hook.js 共用仓库根目录的 names.json。
+// name=屏幕显示；say=语音实际念的文本（只要读音对，用汉字当注音即可）。
+import NAME_TABLE from '../../names.json';
+const DEFAULT_PROJECTS = (() => {
+  const m = {};
+  for (const k of Object.keys(NAME_TABLE)) if (k[0] !== '_') m[k.toLowerCase()] = NAME_TABLE[k];
+  return m;
+})();
+
+// 全大写连写常见词（Title 化）与缩写（逐字母拼读），用来切 ACERGX10 / GPTORG 这类没有大小写边界的名字。
+const CAPS_ACRONYMS = ['AI','API','CLI','CSS','DNS','ERP','GPT','GPU','HTML','HTTP','JSON','LLM','OCR','PDF','PPT','SDK','SEO','SQL','SSH','SVG','TTS','UI','URL','VPN','XML'];
+const CAPS_WORDS = ['ACER','ANDROID','APP','APPLE','AUTO','BETA','BIRD','CANVAS','CHINA','CLOUD','CUT','DEMO','DESIGN','DEV','DOCS','EDGE','FAKE','FOOD','GAME','GEO','GITHUB','HOME','HOUSE','HUB','IMAGE','INTRO','LAB','LIB','LIVE','MAIL','MEDIA','MENU','MINI','MOBILE','MONEY','MUSIC','NEWS','NEXT','NOTE','OPEN','ORG','PAGE','PHONE','PHOTO','PLAN','PLUS','PRO','PROJECT','REPORT','RESEARCH','SHOP','SITE','SKILLS','SMART','SOCIAL','STORE','STUDIO','TEAM','TECH','TEMP','TEST','TILE','TOOL','VIDEO','VIEW','VOICE','WEB','WORK'];
+const CAPS_DICT = [...CAPS_ACRONYMS, ...CAPS_WORDS].sort((a, b) => b.length - a.length);
+
+function titleCase(w) { return w.charAt(0).toUpperCase() + w.slice(1).toLowerCase(); }
+function spellOut(w) { return w.split('').join(' '); }
+
+// 把一段全大写连写按词典贪婪切开；切不动的碎片，短的拼读、长的 Title 化。
+// 一个碎片怎么念：词典里的词 Title 化，缩写逐字母拼读；
+// 剩下的看长相——太短或不含元音的当缩写拼读，否则按词读。
+function renderPiece(t) {
+  if (CAPS_WORDS.includes(t)) return titleCase(t);
+  if (CAPS_ACRONYMS.includes(t)) return spellOut(t);
+  if (t.length <= 4 || !/[AEIOU]/.test(t)) return spellOut(t);
+  return titleCase(t);
+}
+
+function speakCapsRun(run) {
+  if (CAPS_WORDS.includes(run) || CAPS_ACRONYMS.includes(run)) return renderPiece(run);
+  const parts = [];
+  let i = 0;
+  while (i < run.length) {
+    const hit = CAPS_DICT.find((w) => run.startsWith(w, i));
+    if (hit) { parts.push(hit); i += hit.length; continue; }
+    let j = i + 1;
+    while (j < run.length && !CAPS_DICT.some((w) => run.startsWith(w, j))) j++;
+    parts.push(run.slice(i, j));
+    i = j;
+  }
+  // 单字母碎片并回上一段，避免把 NEWS 切成 NEW S
+  const merged = [];
+  for (const t of parts) {
+    if (t.length === 1 && merged.length) merged[merged.length - 1] += t;
+    else merged.push(t);
+  }
+  return merged.map(renderPiece).join(' ');
+}
+
+// 文件夹名 → 可读文本。含中文直接返回；纯拉丁按分隔符/驼峰/数字边界拆，全大写段再进词典切分。
 function humanizeName(key) {
-  return (key || '')
+  const raw = (key || '').toString();
+  if (!raw) return key;
+  if (/[\u4e00-\u9fff]/.test(raw)) return spaceCJK(raw);
+  const rough = raw
     .replace(/[_\-.]+/g, ' ')
     .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
     .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
     .replace(/([A-Za-z])(\d)/g, '$1 $2')
     .replace(/(\d)([A-Za-z])/g, '$1 $2')
+    .replace(/\s+/g, ' ').trim();
+  if (!rough) return key;
+  return rough
+    .split(' ')
+    .map((t) => (/^[A-Z]{2,}$/.test(t) ? speakCapsRun(t) : t))
+    .join(' ')
     .replace(/\s+/g, ' ').trim() || key;
 }
+// 中英文之间补半角空格，念起来不会黏连
+function spaceCJK(s) {
+  return s.replace(/([\u4e00-\u9fff])([A-Za-z0-9])/g, '$1 $2')
+          .replace(/([A-Za-z0-9])([\u4e00-\u9fff])/g, '$1 $2')
+          .replace(/\s+/g, ' ').trim();
+}
 function sayTool(t) { return humanizeName(t || ''); }
-function resolveProject(projectKey) {
-  const o = DEFAULT_PROJECTS[projectKey] || {};
+
+// 热改读音表：存在 Hub DO 里，改完立刻生效、不用重新部署。isolate 内缓存 30 秒。
+let NAMES_CACHE = { at: 0, map: null };
+async function overrideNames(env) {
+  const now = Date.now();
+  if (NAMES_CACHE.map && now - NAMES_CACHE.at < 30000) return NAMES_CACHE.map;
+  try {
+    const r = await hub(env).fetch('https://do/names');
+    NAMES_CACHE = { at: now, map: (await r.json()) || {} };
+  } catch (_) { NAMES_CACHE = { at: now, map: NAMES_CACHE.map || {} }; }
+  return NAMES_CACHE.map;
+}
+
+// 解析项目：热改覆盖 > 内置种子 > 增强兜底拆词
+async function resolveProject(projectKey, env) {
+  const lk = String(projectKey || '').toLowerCase();
+  let ov = {};
+  try { ov = await overrideNames(env); } catch (_) {}
+  const o = { ...(DEFAULT_PROJECTS[lk] || {}), ...(ov[lk] || {}) };   // 只改 say 时不冲掉种子的显示名
   return {
     display: o.name || humanizeName(projectKey),
-    say: o.say || o.name || humanizeName(projectKey),
+    say: spaceCJK(o.say || o.name || humanizeName(projectKey)),
     color: o.color || null,
     voice: o.voice || null,
   };
@@ -116,6 +189,25 @@ export default {
     if (p === '/latest') {
       if (!tokOK) return jsonResp({ error: 'token required' }, 401, cors);
       return hub(env).fetch('https://do/latest');
+    }
+    // 项目读音表热改：GET 看当前覆盖，POST 合并写入（say 为空串表示删掉这条覆盖）。
+    if (p === '/names') {
+      const secOK = env.HOOK_SECRET && req.headers.get('x-cv-secret') === env.HOOK_SECRET;
+      if (!tokOK && !secOK) return jsonResp({ error: 'token required' }, 401, cors);
+      if (req.method === 'GET') {
+        const ov = await hub(env).fetch('https://do/names').then((r) => r.json()).catch(() => ({}));
+        const merged = {};
+        for (const k of Object.keys(DEFAULT_PROJECTS)) merged[k] = { ...DEFAULT_PROJECTS[k], _src: 'seed' };
+        for (const k of Object.keys(ov)) merged[k] = { ...(DEFAULT_PROJECTS[k] || {}), ...ov[k], _src: 'override' };
+        return jsonResp({ ok: true, count: Object.keys(merged).length, overrides: ov, names: merged }, 200, cors);
+      }
+      if (req.method === 'POST') {
+        const body = await req.text();
+        const r = await hub(env).fetch('https://do/names', { method: 'POST', body });
+        NAMES_CACHE = { at: 0, map: null };   // 本 isolate 立刻失效
+        return new Response(await r.text(), { status: r.status, headers: { ...cors, 'content-type': 'application/json' } });
+      }
+      return jsonResp({ error: 'method' }, 405, cors);
     }
     if (p === '/tts' && req.method === 'POST') {
       const secOK = env.HOOK_SECRET && req.headers.get('x-cv-secret') === env.HOOK_SECRET;
@@ -186,6 +278,23 @@ export class Hub {
     if (p === '/sse') return this.handleSSE();
     if (p === '/broadcast') { const ev = await req.json(); await this.broadcast(ev); return Response.json({ ok: true }); }
     if (p === '/subscribe') { const sub = await req.json(); await this.addSub(sub); return Response.json({ ok: true }); }
+    if (p === '/names') {
+      const cur = (await this.state.storage.get('names')) || {};
+      if (req.method !== 'POST') return Response.json(cur);
+      let patch = {};
+      try { patch = (await req.json()) || {}; } catch (_) {}
+      let changed = 0;
+      for (const k of Object.keys(patch)) {
+        const lk = k.toLowerCase();
+        const v = patch[k];
+        if (v === null || v === '' || (v && !v.name && !v.say && !v.color && !v.voice)) { delete cur[lk]; changed++; continue; }
+        const rec = typeof v === 'string' ? { say: v } : v;
+        cur[lk] = { ...(cur[lk] || {}), ...rec };
+        changed++;
+      }
+      await this.state.storage.put('names', cur);
+      return Response.json({ ok: true, changed, count: Object.keys(cur).length });
+    }
     if (p === '/latest') {
       const e = this.recent[this.recent.length - 1] || null;
       const min = e ? { project: e.project, kind: e.kind, title: e.title } : null; // 仅最小信息
@@ -346,8 +455,9 @@ async function normalizeEvent(payload, env) {
   if (bridgeEvent) return bridgeEvent;
   const eventName = payload.hook_event_name || payload.hookEventName || '';
   const cwd = payload.cwd || payload.workspace || '';
-  const projectKey = baseName(cwd) || 'unknown';
-  const proj = resolveProject(projectKey);
+  // hook.js 在本机把 scratchpad / worktree / 子目录都归到了真正的项目；服务端读不到文件系统，只能兜底 basename。
+  const projectKey = (payload.cv_project || '').toString().trim() || baseName(cwd) || 'unknown';
+  const proj = await resolveProject(projectKey, env);
   const rawMsg = (payload.message || '').toString().trim();
   const U = env.USER_NAME || 'Dev';
 

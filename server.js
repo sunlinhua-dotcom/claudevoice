@@ -68,34 +68,82 @@ function userAddresses() {
 
 const PROJECTS = loadProjects(path.join(__dirname, 'projects.json'));
 
-// 内置「中文名 + TTS 读音」种子（我的判断；projects.json 可覆盖）。
-// name = 屏幕显示；say = 语音实际念的读音。
-const DEFAULT_PROJECTS = {
-  CLAUDEVOICE: { name: '语音通知台', say: 'Claude Voice' },
-  autoresearch: { name: '自动研究', say: 'Auto Research' },
-  'my-web-app': { name: '我的网站', say: 'My Web App' },
-  'api-service': { name: '接口服务', say: 'API Service' },
-  'docs-site': { name: '文档站', say: 'Docs Site' },
-};
+// 内置「中文名 + TTS 读音」种子表，与 hook.js / Worker 共用同一份 names.json。
+// name = 屏幕显示；say = 语音实际念的读音（只要读音对，用汉字当注音即可）。projects.json 仍可覆盖。
+const DEFAULT_PROJECTS = (() => {
+  try {
+    const t = JSON.parse(fs.readFileSync(path.join(__dirname, 'names.json'), 'utf8'));
+    const m = {};
+    for (const k of Object.keys(t)) if (k[0] !== '_') m[k.toLowerCase()] = t[k];
+    return m;
+  } catch (_) { return {}; }
+})();
 
-// 把文件夹名拆成可读形式：驼峰 / 全大写缩写 / 下划线连字符 / 字母数字边界 都加空格
+// 全大写连写常见词（Title 化）与缩写（逐字母拼读），用来切 ACERGX10 / GPTORG 这类没有大小写边界的名字。
+const CAPS_ACRONYMS = ['AI','API','CLI','CSS','DNS','ERP','GPT','GPU','HTML','HTTP','JSON','LLM','OCR','PDF','PPT','SDK','SEO','SQL','SSH','SVG','TTS','UI','URL','VPN','XML'];
+const CAPS_WORDS = ['ACER','ANDROID','APP','APPLE','AUTO','BETA','BIRD','CANVAS','CHINA','CLOUD','CUT','DEMO','DESIGN','DEV','DOCS','EDGE','FAKE','FOOD','GAME','GEO','GITHUB','HOME','HOUSE','HUB','IMAGE','INTRO','LAB','LIB','LIVE','MAIL','MEDIA','MENU','MINI','MOBILE','MONEY','MUSIC','NEWS','NEXT','NOTE','OPEN','ORG','PAGE','PHONE','PHOTO','PLAN','PLUS','PRO','PROJECT','REPORT','RESEARCH','SHOP','SITE','SKILLS','SMART','SOCIAL','STORE','STUDIO','TEAM','TECH','TEMP','TEST','TILE','TOOL','VIDEO','VIEW','VOICE','WEB','WORK'];
+const CAPS_DICT = [...CAPS_ACRONYMS, ...CAPS_WORDS].sort((a, b) => b.length - a.length);
+
+function titleCase(w) { return w.charAt(0).toUpperCase() + w.slice(1).toLowerCase(); }
+function spellOut(w) { return w.split('').join(' '); }
+// 一个碎片怎么念：词典里的词 Title 化，缩写逐字母拼读；剩下的太短或不含元音就当缩写拼读。
+function renderPiece(t) {
+  if (CAPS_WORDS.includes(t)) return titleCase(t);
+  if (CAPS_ACRONYMS.includes(t)) return spellOut(t);
+  if (t.length <= 4 || !/[AEIOU]/.test(t)) return spellOut(t);
+  return titleCase(t);
+}
+// 把一段全大写连写按词典贪婪切开；单字母碎片并回上一段，避免把 NEWS 切成 NEW S
+function speakCapsRun(run) {
+  if (CAPS_WORDS.includes(run) || CAPS_ACRONYMS.includes(run)) return renderPiece(run);
+  const parts = [];
+  let i = 0;
+  while (i < run.length) {
+    const hit = CAPS_DICT.find((w) => run.startsWith(w, i));
+    if (hit) { parts.push(hit); i += hit.length; continue; }
+    let j = i + 1;
+    while (j < run.length && !CAPS_DICT.some((w) => run.startsWith(w, j))) j++;
+    parts.push(run.slice(i, j));
+    i = j;
+  }
+  const merged = [];
+  for (const t of parts) {
+    if (t.length === 1 && merged.length) merged[merged.length - 1] += t;
+    else merged.push(t);
+  }
+  return merged.map(renderPiece).join(' ');
+}
+// 中英文之间补半角空格，念起来不会黏连
+function spaceCJK(s) {
+  return String(s).replace(/([\u4e00-\u9fff])([A-Za-z0-9])/g, '$1 $2')
+    .replace(/([A-Za-z0-9])([\u4e00-\u9fff])/g, '$1 $2')
+    .replace(/\s+/g, ' ').trim();
+}
+// 把文件夹名拆成可读形式：含中文直接返回；纯拉丁按分隔符/驼峰/数字边界拆，全大写段再进词典切分
 function humanizeName(key) {
-  return (key || '')
+  const raw = (key || '').toString();
+  if (!raw) return key;
+  if (/[\u4e00-\u9fff]/.test(raw)) return spaceCJK(raw);
+  const rough = raw
     .replace(/[_\-.]+/g, ' ')
     .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
     .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
     .replace(/([A-Za-z])(\d)/g, '$1 $2')
     .replace(/(\d)([A-Za-z])/g, '$1 $2')
+    .replace(/\s+/g, ' ').trim();
+  if (!rough) return key;
+  return rough.split(' ').map((t) => (/^[A-Z]{2,}$/.test(t) ? speakCapsRun(t) : t)).join(' ')
     .replace(/\s+/g, ' ').trim() || key;
 }
 // 工具名也拆驼峰，方便英文读对：WebFetch → Web Fetch
 function sayTool(t) { return humanizeName(t || ''); }
-// 解析项目：手工覆盖 > 种子 > 机械拆词
+// 解析项目：手工覆盖 > 种子 > 增强兜底拆词
 function resolveProject(projectKey, cwd) {
-  const o = PROJECTS[projectKey] || PROJECTS[cwd] || DEFAULT_PROJECTS[projectKey] || {};
+  const lk = String(projectKey || '').toLowerCase();
+  const o = PROJECTS[projectKey] || PROJECTS[lk] || PROJECTS[cwd] || DEFAULT_PROJECTS[lk] || {};
   return {
     display: o.name || humanizeName(projectKey),
-    say: o.say || o.name || humanizeName(projectKey),
+    say: spaceCJK(o.say || o.name || humanizeName(projectKey)),
     color: o.color || null,
     voice: o.voice || null,
   };
@@ -171,7 +219,8 @@ function handleHook(req, res) {
 function normalizeEvent(payload) {
   const eventName = payload.hook_event_name || payload.hookEventName || '';
   const cwd = payload.cwd || payload.workspace || '';
-  const projectKey = baseName(cwd) || 'unknown';
+  // hook.js 已在本机把 scratchpad / worktree / 子目录归到真正的项目；没有就退回 basename。
+  const projectKey = (payload.cv_project || '').toString().trim() || baseName(cwd) || 'unknown';
   const proj = resolveProject(projectKey, cwd);   // {display, say, color, voice}
   const rawMsg = (payload.message || '').toString().trim();
   const U = CFG.userName;
