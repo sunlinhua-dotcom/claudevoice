@@ -9,7 +9,15 @@
 # → App 专用密码 生成，不是 Apple ID 的登录密码。
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# 沿软链接回到真实脚本目录：本脚本会被链到 ~/.local/bin/cvnotarize，
+# 直接 dirname "$0" 会落在 ~/.local/bin，找不到同目录的 build.sh。
+SRC="${BASH_SOURCE[0]:-$0}"
+while [ -L "$SRC" ]; do
+  LINK_DIR="$(cd -P "$(dirname "$SRC")" && pwd)"
+  SRC="$(readlink "$SRC")"
+  case "$SRC" in /*) ;; *) SRC="$LINK_DIR/$SRC" ;; esac
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$SRC")" && pwd)"
 cd "$SCRIPT_DIR"
 PROFILE="${CV_NOTARY_PROFILE:-claudevoice}"
 APP="${CV_APP_PATH:-/Applications/ClaudeVoice.app}"
