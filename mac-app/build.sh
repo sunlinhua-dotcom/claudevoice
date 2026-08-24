@@ -96,8 +96,12 @@ fi
 RV_KEYCHAIN="$HOME/Library/Keychains/remotevoice-signing.keychain-db"
 RV_SIGN_ID="${RV_SIGN_ID:-RemoteVoice Local Signing}"
 RV_KCPASS="${RV_KCPASS:-rvlocal-signing}"
-if [ -n "$DEVID" ] && codesign --force --deep --sign "$DEVID" --identifier com.claudevoice.app "$APP" 2>/dev/null; then
-  echo "  已用 Developer ID 签名：$DEVID"
+# 公证要求 Hardened Runtime + 安全时间戳，缺一个都会被拒。
+# 本 App 只用辅助功能 / CGEvent / 启子进程放音，这些在 Hardened Runtime 下
+# 不需要额外 entitlement（辅助功能靠 TCC 授权，不靠签名权限）。
+if [ -n "$DEVID" ] && codesign --force --deep --options runtime --timestamp \
+     --sign "$DEVID" --identifier com.claudevoice.app "$APP" 2>/dev/null; then
+  echo "  已用 Developer ID 签名（Hardened Runtime + 时间戳）：$DEVID"
 else
   if [ -f "$RV_KEYCHAIN" ]; then
     security unlock-keychain -p "$RV_KCPASS" "$RV_KEYCHAIN" 2>/dev/null || true
