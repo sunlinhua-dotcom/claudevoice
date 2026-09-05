@@ -49,9 +49,14 @@ function forward(body) {
   // 关键：末句若是英文，在本机（能访问 Google）翻成中文再发——Worker 那边 Cloudflare IP 会被 Google 429。
   let obj;
   try { obj = JSON.parse(body || '{}'); } catch (_) { return postBody(body); }
+  // BRIGHT 的通知口径（2026-08-30）：CloudCLI 网页会话不往飞书推卡（人在网页前，卡是噪音），
+  // 桌面/其他会话照推；CLAUDEVOICE_LARK=1 强制恢复推送。
+  if (process.env.CLAUDEVOICE_LARK === '1') delete obj.noLark;
+  else if (fromCloudCliSession()) obj.noLark = true;
   if (!obj.hook_event_name && process.argv[2]) obj.hook_event_name = process.argv[2];
   try { obj.cv_project = resolveProjectKey(obj.cwd); } catch (_) {}   // 真正的项目名（本机能读文件系统，服务端读不到）
   try { nativeNotify(obj); } catch (_) {}   // Mac 原生横幅提醒（视觉）
+  try { imsgNotify(obj); } catch (_) {}     // iMessage 完成深链（手机直达会话，与云端链路互不影响）
 
   if (obj.hook_event_name === 'Stop' && obj.transcript_path && !obj.cv_preview) {
     const prev = lastAssistantText(obj.transcript_path);
@@ -164,6 +169,80 @@ function nativeNotify(obj) {
   } catch (_) {}
 }
 
+// ---------- iMessage 完成通知（本机 imsg CLI，深链直达 CloudCLI 会话）----------
+// 仅 Stop（完成/失败）发；等审批、子任务、其他事件一律不打扰。与云端通知完全独立：
+// 耗时算不出来 / imsg 不存在 / 发送失败全部静默吞掉，绝不能拖垮或挡住原链路。
+// CLAUDEVOICE_IMSG=0 关闭；CLAUDEVOICE_IMSG_MIN_SECS 调耗时门槛（默认 120 秒）。
+function imsgNotify(obj) {
+  try {
+    if (process.env.CLAUDEVOICE_IMSG === '0') return;
+    if (!obj || obj.hook_event_name !== 'Stop') return;
+    if (!obj.transcript_path || !obj.session_id) return;
+    const turn = readTurnInfo(obj.transcript_path);
+    if (!turn) return;   // 起点/耗时算不出来：宁静默不发
+    const rawMin = Number(process.env.CLAUDEVOICE_IMSG_MIN_SECS);
+    const minSecs = Number.isFinite(rawMin) && rawMin >= 0 ? rawMin : 120;
+    const elapsed = (Date.now() - turn.startTs) / 1000;
+    if (elapsed < minSecs) return;
+    const key = obj.cv_project || resolveProjectKey(obj.cwd);
+    const proj = (NAMES[key] && NAMES[key].name) || humanize(key) || '项目';
+    // 深链基址与 bridge/cloudcli.mjs 同规则（去尾斜杠），但保持零依赖不 import
+    const base = String(process.env.CC_WEB_URL || 'https://cc.nforce.top').replace(/\/+$/, '');
+    const brief = turn.text.replace(/[\r\n]+/g, ' ').trim().slice(0, 80);
+    const mins = Math.max(1, Math.round(elapsed / 60));
+    const line = `「${proj}」${turn.failed ? '失败了' : '跑完了'}（约${mins}分钟）：${brief} ${base}/session/${obj.session_id}`;
+    const bin = process.env.CLAUDEVOICE_IMSG_BIN || path.join(os.homedir(), '.local', 'bin', 'imsg');
+    const c = spawn(bin, [line], { detached: true, stdio: 'ignore' });
+    c.on('error', () => {});
+    c.unref();
+  } catch (_) {}
+}
+
+// 从 transcript 尾部读「本轮」信息：起点 = 最后一条真正的用户消息（跳过 tool_result 回传与
+// isMeta 命令行，否则工具结果会把耗时算成几秒钟）；摘要 = 最后一条 assistant 文本，
+// 该条带 isApiErrorMessage 时按失败口径发。任何一步不成立都返回 null（调用方不发）。
+function readTurnInfo(p) {
+  const lines = tailLines(p);
+  if (!lines) return null;
+  let startTs = 0, text = '', failed = false;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    let o; try { o = JSON.parse(lines[i]); } catch (_) { continue; }
+    if (!o || o.isMeta) continue;
+    if (!startTs && isUserPrompt(o)) {
+      const t = Date.parse(o.timestamp || '');
+      if (!Number.isFinite(t) || t <= 0) return null;   // 最后的用户消息没时间戳 → 耗时算不出
+      startTs = t;
+    }
+    const role = o.type || (o.message && o.message.role);
+    if (!text && role === 'assistant') {
+      const c = o.message && o.message.content;
+      let t = '';
+      if (typeof c === 'string') t = c;
+      else if (Array.isArray(c)) t = c.filter((x) => x && x.type === 'text').map((x) => x.text).join(' ');
+      t = (t || '').trim();
+      if (t) {
+        text = t;
+        failed = Boolean(o.isApiErrorMessage || (o.message && o.message.isApiErrorMessage));
+      }
+    }
+    if (startTs && text) break;
+  }
+  return startTs ? { startTs, text, failed } : null;
+}
+
+// 真正的用户输入：有文本内容，且不是 tool_result 回传（工具结果也是 type=user，会把起点顶到最后）
+function isUserPrompt(o) {
+  const role = o.type || (o.message && o.message.role);
+  if (role !== 'user') return false;
+  const c = o.message && o.message.content;
+  if (typeof c === 'string') return c.trim().length > 0;
+  if (Array.isArray(c)) {
+    if (c.some((x) => x && x.type === 'tool_result')) return false;
+    return c.some((x) => x && x.type === 'text' && String(x.text).trim());
+  }
+  return false;
+}
+
 // 读音 / 显示名表（与 Worker 共用同一份 names.json，横幅显示中文名用）
 const NAMES = (() => {
   try {
@@ -178,6 +257,27 @@ const NAMES = (() => {
 // cwd 的最后一段常常不是项目：scratchpad 临时目录、git worktree 代号、仓库子目录都会被误当成项目。
 // 顺序：scratchpad 还原 → worktree 回溯 → projectRoots 下一层 → 标记文件向上找 → basename 兜底。
 const PROJECT_MARKERS = ['.git', 'CLAUDE.md', '.claude', 'package.json', 'pyproject.toml', 'Cargo.toml', 'go.mod'];
+
+// 判定本会话是否由 CloudCLI 网页驾驶舱拉起：网页会话的父进程链上必有
+// CloudCLI 服务进程（node dist-server/server/index.js）。桌面终端里跑的 claude 没有。
+// CLAUDEVOICE_ORIGIN=web|desktop 可强制指定（测试与逃生用）。判定失败一律当桌面（宁推勿漏）。
+function fromCloudCliSession() {
+  const forced = (process.env.CLAUDEVOICE_ORIGIN || '').toLowerCase();
+  if (forced === 'web') return true;
+  if (forced === 'desktop') return false;
+  try {
+    const { execSync } = require('child_process');
+    let pid = process.ppid;
+    for (let i = 0; i < 8 && pid > 1; i++) {
+      const line = execSync(`ps -o ppid=,command= -p ${pid}`, { timeout: 1000 }).toString();
+      const m = /^\s*(\d+)\s+([\s\S]*)$/.exec(line);
+      if (!m) break;
+      if (m[2].includes('dist-server/server/index.js')) return true;
+      pid = Number(m[1]);
+    }
+  } catch (_) {}
+  return false;
+}
 
 function resolveProjectKey(cwdRaw) {
   let cwd = (cwdRaw || '').toString().replace(/[\/\\]+$/, '');
@@ -260,8 +360,8 @@ function humanize(key) {
 }
 function baseName(p) { return p ? p.replace(/[\/\\]+$/, '').split(/[\/\\]/).pop() : ''; }
 
-// 读 transcript（JSONL）尾部，取最后一条 assistant 文本（与 server.js 同逻辑）
-function lastAssistantText(p) {
+// 读 transcript（JSONL）尾部 512KB 的行（最后几条记录足够）；读不了返回 null
+function tailLines(p) {
   try {
     const fd = fs.openSync(p, 'r');
     let txt;
@@ -272,18 +372,23 @@ function lastAssistantText(p) {
       fs.readSync(fd, buf, 0, buf.length, start);
       txt = buf.toString('utf8');
     } finally { fs.closeSync(fd); }
-    const lines = txt.split('\n').filter(Boolean);
-    for (let i = lines.length - 1; i >= 0; i--) {
-      let o; try { o = JSON.parse(lines[i]); } catch (_) { continue; }
-      const role = o.type || (o.message && o.message.role);
-      if (role !== 'assistant') continue;
-      const c = o.message && o.message.content;
-      let t = '';
-      if (typeof c === 'string') t = c;
-      else if (Array.isArray(c)) t = c.filter((x) => x && x.type === 'text').map((x) => x.text).join(' ');
-      t = (t || '').trim();
-      if (t) return t;
-    }
-  } catch (_) {}
+    return txt.split('\n').filter(Boolean);
+  } catch (_) { return null; }
+}
+
+// 读 transcript（JSONL）尾部，取最后一条 assistant 文本（与 server.js 同逻辑）
+function lastAssistantText(p) {
+  const lines = tailLines(p) || [];
+  for (let i = lines.length - 1; i >= 0; i--) {
+    let o; try { o = JSON.parse(lines[i]); } catch (_) { continue; }
+    const role = o.type || (o.message && o.message.role);
+    if (role !== 'assistant') continue;
+    const c = o.message && o.message.content;
+    let t = '';
+    if (typeof c === 'string') t = c;
+    else if (Array.isArray(c)) t = c.filter((x) => x && x.type === 'text').map((x) => x.text).join(' ');
+    t = (t || '').trim();
+    if (t) return t;
+  }
   return '';
 }

@@ -535,6 +535,7 @@ async function normalizeEvent(payload, env) {
     ts: Date.now(),
     kind,
     needsAction: kind === 'waiting' || kind === 'permission',
+    noLark: Boolean(payload.noLark),
     silent: kind === 'subagent' && (env.CV_SUBAGENT || 'silent').toLowerCase() !== 'voice',
     project: proj.display, projectKey, cwd, color: proj.color || null,
     unknownName: !proj.known,               // 读音表里没有，念法是兜底猜的
