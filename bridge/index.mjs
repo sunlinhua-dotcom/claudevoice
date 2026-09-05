@@ -10,10 +10,13 @@ import { createObservedDispatcher, createSdkLogger, LarkConnectionManager } from
 import { extractOutputFiles, MediaStore, parseAttachmentMessage } from './media.mjs';
 import { createCardActionHandler, createMessageHandler, formatPingStatus } from './router.mjs';
 import { ClaudeRunner } from './runner.mjs';
-import { SessionStore } from './sessions.mjs';
+import { discoverDiskSessions, mergeProjectSessions, SessionStore } from './sessions.mjs';
 import { checkFfmpeg, transcribeLarkAudio } from './stt.mjs';
 import { clip, createLogger, loadEnvFile, redact } from './utils.mjs';
 import { BridgeEventClient } from './worker-events.mjs';
+import {
+  buildSessionUrl, formatRelativeTime, normalizeWebUrl, probeCloudCli,
+} from './cloudcli.mjs';
 
 const BRIGHT_OPEN_ID = ''; // owner 的飞书 open_id 从 .env 的 LARK_OPEN_ID 注入
 
@@ -21,7 +24,8 @@ export class BridgeController {
   constructor({
     store, runner, cards, approval, injector = new DisabledInjector(), clipboard = copyTextToClipboard,
     media = null, attachmentClipboard = writeAttachmentsToClipboard, events = null,
-    connectionHealth = null, log = console,
+    connectionHealth = null, log = console, discoverSessions = discoverDiskSessions,
+    cloudCliProbe = probeCloudCli, now = Date.now, webUrl = normalizeWebUrl(),
   }) {
     this.store = store;
     this.runner = runner;
@@ -34,6 +38,10 @@ export class BridgeController {
     this.events = events;
     this.connectionHealth = connectionHealth;
     this.log = log;
+    this.discoverSessions = discoverSessions;
+    this.cloudCliProbe = cloudCliProbe;
+    this.now = now;
+    this.webUrl = webUrl;
   }
 
   start() {
@@ -233,8 +241,13 @@ export class BridgeController {
     }
     if (command.name === 'status') {
       const active = this.store.listTasks({ activeOnly: true });
-      if (!active.length) return reply('当前没有活动任务或排队任务。');
-      return reply(active.map((task) => `#${task.number} ${task.project} · ${task.status} · 追问队列 ${task.pendingPrompts?.length || 0}`).join('\n'));
+      const taskStatus = active.length
+        ? active.map((task) => `#${task.number} ${task.project} · ${task.status} · 追问队列 ${task.pendingPrompts?.length || 0}`).join('\n')
+        : '当前没有活动任务或排队任务。';
+      const online = await this.cloudCliProbe();
+      let host = 'cc.nforce.top';
+      try { host = new URL(this.webUrl).hostname || host; } catch {}
+      return reply(`${taskStatus}\n${online ? `驾驶舱在线 ${host}` : '驾驶舱离线'}`);
     }
     if (command.name === 'stop') {
       const task = await this.store.stopTask(command.args);
@@ -263,10 +276,20 @@ export class BridgeController {
       return reply(`✅ 模型覆盖已设为：${model || 'Claude 默认'}`);
     }
     if (command.name === 'sessions') {
-      const project = this.store.state.currentProject;
-      const sessions = this.store.recentSessions(project);
-      if (!sessions.length) return reply(`${project} 暂无已捕获会话。`);
-      return reply(sessions.map((item, index) => `${index + 1}. ${item.sessionId}\n   ${item.preview || ''}`).join('\n'));
+      const projectName = this.store.state.currentProject;
+      const project = this.store.resolveProject(projectName);
+      const bridgeSessions = this.store.recentSessions(projectName);
+      const diskSessions = project?.path
+        ? await this.discoverSessions(project.path, { bridgeSessions })
+        : [];
+      const sessions = mergeProjectSessions(bridgeSessions, diskSessions);
+      await this.store.setSessionMenu(projectName, sessions);
+      if (!sessions.length) return reply(`${projectName} 暂无可发现会话。`);
+      return reply(sessions.map((item, index) => [
+        `${index + 1}. [${item.source}] ${item.preview || '（无摘要）'}`,
+        `   ${formatRelativeTime(item.mtime || item.updatedAt, this.now())} · ${item.sessionId}`,
+        `   ${buildSessionUrl(item.sessionId, this.webUrl)}`,
+      ].join('\n')).join('\n'));
     }
     if (command.name === 'resume') {
       const project = this.store.state.currentProject;
@@ -285,6 +308,8 @@ export class BridgeController {
       '', '⚙️ Claude 设置',
       '/mode <default|accept|yolo|plan>｜模式 <值>', '/model <名|default>｜模型 <名>',
       '/sessions　最近会话', '/resume [n]　下一条消息续接会话',
+      '卡片按钮「🖥 打开驾驶舱」可直达当前会话',
+      '/sessions 可查看飞书及网页/桌面会话，并用 /resume [n] 续接',
       '', '💬 输入方式',
       '/input｜输入模式　语音/文字复制并输入电脑（默认）',
       '/task｜任务模式　语音/文字交给 Claude',

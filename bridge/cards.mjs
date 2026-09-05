@@ -2,6 +2,7 @@ import { clip, formatDuration, safeJson } from './utils.mjs';
 import { readFileSync, statSync } from 'node:fs';
 import { extname, join } from 'node:path';
 import { isImageFile, outputFileName, readOutputFile } from './media.mjs';
+import { buildSessionUrl } from './cloudcli.mjs';
 
 const DECISION_RE = /[?？]|是否|还是|要不要|需不需要|需要你|请你确认|请确认|建议|你来定|你决定|你看|选择|二选一|哪一个|哪个|可以吗|对吗|要不/;
 
@@ -44,6 +45,23 @@ function button(label, value, type = 'default') {
     type,
     behaviors: [{ type: 'callback', value }],
   };
+}
+
+function dashboardButton(sessionId) {
+  const url = buildSessionUrl(sessionId);
+  if (!url) return null;
+  return {
+    tag: 'button',
+    text: { tag: 'plain_text', content: '🖥 打开驾驶舱' },
+    type: 'default',
+    url,
+    multi_url: { url, pc_url: url, ios_url: url, android_url: url },
+  };
+}
+
+function dashboardActions(sessionId) {
+  const action = dashboardButton(sessionId);
+  return action ? [action] : [];
 }
 
 function card({ title, template = 'blue', markdown, actions = [], note = '', bannerKind = '', imageKeys = loadBannerKeys() }) {
@@ -93,6 +111,7 @@ export function buildTaskCard(task, now = Date.now(), imageKeys = loadBannerKeys
     template: task.status === 'done' ? 'green' : ['failed', 'stopping'].includes(task.status) ? 'red' : ['queued', 'waiting'].includes(task.status) ? 'orange' : 'blue',
     markdown: `**项目：** ${task.project}\n**任务：** #${task.number}\n**触发消息：** ${clip(task.prompt || '（无）', 240)}\n**状态：** ${status}${errorLine}\n**最近工具：**\n${tools}\n**耗时：** ${formatDuration(activeElapsed)}${task.waitingFor ? '（等待不计时）' : ''}\n**事件数：** ${task.eventCount || 0}${queueLine}${metrics ? `\n${metrics}` : ''}`,
     note: `模式 ${task.mode || 'default'} · 模型 ${task.model || '默认'} · 第 ${task.round || 0} 轮`,
+    actions: dashboardActions(task.sessionId),
     bannerKind: task.status === 'done' ? 'done' : task.status === 'failed' ? 'failed' : task.status === 'queued' ? 'queued' : 'running',
     imageKeys,
   });
@@ -108,6 +127,7 @@ export function buildApprovalCard({ task, rid, toolName, input }, imageKeys = lo
       button('允许', { ns: 'cc', act: 'approve', rid }, 'primary'),
       button('拒绝', { ns: 'cc', act: 'deny', rid }, 'danger'),
       button('本任务总是允许', { ns: 'cc', act: 'always', rid }),
+      ...dashboardActions(task.sessionId),
     ],
     note: '10 分钟未处理将自动拒绝',
     bannerKind: 'permission', imageKeys,
@@ -155,6 +175,7 @@ export function buildCompleteCard(task, imageKeys = loadBannerKeys()) {
     actions: [
       button('继续', { ns: 'cc', act: 'continue', tid: task.id }, 'primary'),
       button('重试', { ns: 'cc', act: 'retry', tid: task.id }),
+      ...dashboardActions(task.sessionId),
     ],
     note: `耗时 ${formatDuration((task.finishedAt || Date.now()) - (task.startedAt || task.createdAt))} · ${task.eventCount || 0} 个事件`,
     bannerKind: 'done', imageKeys,
@@ -167,7 +188,10 @@ export function buildFailureCard(task, imageKeys = loadBannerKeys()) {
     title: `❌ #${task.number} · ${task.project} · 失败`,
     template: 'red',
     markdown: `**项目：** ${task.project}\n**任务：** #${task.number}\n**触发消息：** ${clip(task.prompt || '（无）', 240)}\n\n**失败原因**\n${detail}\n\n**stderr 尾部**\n${clip(task.stderrTail || '（空）', 1000)}`,
-    actions: [button('重试', { ns: 'cc', act: 'retry', tid: task.id }, 'primary')],
+    actions: [
+      button('重试', { ns: 'cc', act: 'retry', tid: task.id }, 'primary'),
+      ...dashboardActions(task.sessionId),
+    ],
     bannerKind: 'failed', imageKeys,
   });
 }

@@ -1,8 +1,10 @@
 import { EventEmitter } from 'node:events';
-import { existsSync } from 'node:fs';
+import { createReadStream, existsSync } from 'node:fs';
 import { mkdir, readFile, readdir, rename, stat, writeFile } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { id } from './utils.mjs';
+import { createInterface } from 'node:readline';
+import { clip, id } from './utils.mjs';
 
 const SEEDS = {
   claudevoice: { path: '/Volumes/ProjectsAPFS/CLAUDEVOICE', source: 'seed' },
@@ -18,10 +20,92 @@ const DEFAULT_STATE = {
   inputDeliveries: {},
   settings: { mode: 'default', model: '', inputMode: 'input' },
   resumeNext: {},
+  sessionMenus: {},
 };
 
 function cleanName(name) {
   return String(name || '').trim().toLowerCase();
+}
+
+export function encodeClaudeProjectPath(projectPath) {
+  return resolve(String(projectPath || '')).replace(/[^A-Za-z0-9]/g, '-');
+}
+
+function messageText(content) {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  return content
+    .filter((item) => item?.type === 'text' && item.text)
+    .map((item) => item.text)
+    .join(' ');
+}
+
+async function readSessionPreview(file, maxBytes = 64 * 1024) {
+  let summary = '';
+  const stream = createReadStream(file, { encoding: 'utf8', start: 0, end: maxBytes - 1 });
+  const lines = createInterface({ input: stream, crlfDelay: Infinity });
+  try {
+    for await (const line of lines) {
+      let value;
+      try { value = JSON.parse(line); } catch { continue; }
+      const role = value?.message?.role || value?.role || '';
+      if (role === 'user' || value?.type === 'user') {
+        const text = messageText(value?.message?.content ?? value?.content);
+        if (text) return clip(text, 120);
+      }
+      if (!summary && typeof value?.summary === 'string') summary = value.summary;
+    }
+  } catch {}
+  finally {
+    lines.close();
+    stream.destroy();
+  }
+  return clip(summary, 120);
+}
+
+export async function discoverDiskSessions(projectPath, {
+  limit = 8,
+  projectsRoot = join(homedir(), '.claude', 'projects'),
+  bridgeSessions = [],
+} = {}) {
+  const directory = join(projectsRoot, encodeClaudeProjectPath(projectPath));
+  let entries;
+  try { entries = await readdir(directory, { withFileTypes: true }); } catch { return []; }
+  const bridgeIds = new Set(bridgeSessions.map((item) => typeof item === 'string' ? item : item?.sessionId).filter(Boolean));
+  const files = [];
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.endsWith('.jsonl')) continue;
+    const file = join(directory, entry.name);
+    try {
+      const info = await stat(file);
+      files.push({ file, sessionId: entry.name.slice(0, -'.jsonl'.length), mtime: info.mtimeMs });
+    } catch {}
+  }
+  files.sort((left, right) => right.mtime - left.mtime);
+  const selected = files.slice(0, Math.max(0, Number(limit) || 0));
+  return Promise.all(selected.map(async (item) => ({
+    sessionId: item.sessionId,
+    mtime: item.mtime,
+    preview: await readSessionPreview(item.file),
+    source: bridgeIds.has(item.sessionId) ? '飞书' : '网页/桌面',
+  })));
+}
+
+export function mergeProjectSessions(bridgeSessions = [], diskSessions = []) {
+  const merged = new Map();
+  for (const item of diskSessions) {
+    if (!item?.sessionId) continue;
+    merged.set(item.sessionId, { ...item, source: item.source || '网页/桌面' });
+  }
+  for (const item of bridgeSessions) {
+    if (!item?.sessionId) continue;
+    merged.set(item.sessionId, {
+      ...item,
+      mtime: item.updatedAt || item.mtime || 0,
+      source: '飞书',
+    });
+  }
+  return [...merged.values()].sort((left, right) => (right.mtime || right.updatedAt || 0) - (left.mtime || left.updatedAt || 0));
 }
 
 export class SessionStore extends EventEmitter {
@@ -103,6 +187,7 @@ export class SessionStore extends EventEmitter {
         inputDeliveries: value.inputDeliveries || {},
         settings,
         resumeNext: value.resumeNext || {},
+        sessionMenus: value.sessionMenus || {},
       };
     } catch (error) {
       if (error?.code !== 'ENOENT') throw error;
@@ -279,8 +364,17 @@ export class SessionStore extends EventEmitter {
     return this.state.projectSessions[project] || [];
   }
 
+  async setSessionMenu(project, sessions) {
+    this.state.sessionMenus[project] = sessions.map((item) => item.sessionId).filter(Boolean);
+    await this.save();
+  }
+
   async selectResume(project, index = 1) {
-    const session = this.recentSessions(project)[Number(index) - 1] || null;
+    const position = Number(index) - 1;
+    const mappedId = this.state.sessionMenus[project]?.[position];
+    const session = mappedId
+      ? { sessionId: mappedId }
+      : this.recentSessions(project)[position] || null;
     if (!session) return null;
     this.state.resumeNext[project] = session.sessionId;
     await this.save();
@@ -360,6 +454,7 @@ export class SessionStore extends EventEmitter {
   async clearProject(project = this.state.currentProject) {
     this.state.projectSessions[project] = [];
     delete this.state.resumeNext[project];
+    delete this.state.sessionMenus[project];
     await this.save();
   }
 
