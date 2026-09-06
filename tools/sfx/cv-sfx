@@ -1,0 +1,84 @@
+#!/usr/bin/env python
+"""cv-sfx —— ClaudeVoice 的项目专属提示音工具（本地 Stable Audio Open Small，不联网不花钱）。
+
+  cv-sfx one   CLAUDEVOICE          只做一个项目（done + alert 两条）
+  cv-sfx batch [--only A,B]         按 names.json 批量做，已存在的跳过（--force 重做）
+  cv-sfx list                       看每个项目分到了什么音色
+  cv-sfx play  CLAUDEVOICE          试听
+成品在 ~/.claude/cv-cues/<key>-done.wav / -alert.wav，2~5 秒、响度对齐。
+"""
+import argparse, json, os, subprocess, sys, time
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+import palette                                     # noqa: E402
+from palette import assign_slots, describe, prompt_for, seed_for   # noqa: E402
+
+ROOT = HERE.parent.parent
+OUT = Path(os.path.expanduser("~/.claude/cv-cues"))
+KINDS = ("done", "alert")
+DUR = {"done": 4.5, "alert": 3.5}                  # 都在 2~5 秒区间内；涌升型音效要给够时间铺开
+
+
+def names():
+    d = json.loads((ROOT / "names.json").read_text(encoding="utf-8"))
+    return {k: v for k, v in d.items() if not k.startswith("_")}
+
+
+def cue_path(key, kind):
+    safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in key)
+    return OUT / f"{safe}-{kind}.wav"
+
+
+def do_batch(keys, slots, force, gen):
+    made = skipped = 0
+    for i, k in enumerate(keys, 1):
+        for kind in KINDS:
+            p = cue_path(k, kind)
+            if p.exists() and not force:
+                skipped += 1; continue
+            t0 = time.time()
+            gen.make(prompt_for(k, kind, slots[k]), p, DUR[kind], seed_for(k, kind))
+            made += 1
+            print(f"[{i}/{len(keys)}] {k} {kind}  {time.time()-t0:.1f}s  → {p.name}", flush=True)
+    print(f"\n完成：新生成 {made} 条，跳过 {skipped} 条，目录 {OUT}")
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="cv-sfx")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    for c in ("one", "batch", "list", "play"):
+        s = sub.add_parser(c)
+        if c in ("one", "play"): s.add_argument("key")
+        if c == "batch": s.add_argument("--only", default="")
+        if c in ("one", "batch"): s.add_argument("--force", action="store_true")
+    a = ap.parse_args()
+
+    n = names()
+    slots = assign_slots(n.keys())
+
+    if a.cmd == "list":
+        for k in sorted(n):
+            d = describe(k, slots[k])
+            print(f"{k:24s} {n[k]['name']:16s} {d['family']} / {d['register']} / {d['motion']}")
+        return
+    if a.cmd == "play":
+        for kind in KINDS:
+            p = cue_path(a.key, kind)
+            print(("▶ " if p.exists() else "✗ 还没生成 ") + str(p))
+            if p.exists(): subprocess.run(["afplay", str(p)])
+        return
+
+    import gen                                      # 只有真要出声时才加载模型
+    if a.cmd == "one":
+        keys = [a.key]
+        slots.setdefault(a.key, palette.slot_for(a.key))
+    else:
+        keys = [k.strip() for k in a.only.split(",") if k.strip()] or sorted(n)
+        for k in keys: slots.setdefault(k, palette.slot_for(k))
+    do_batch(keys, slots, a.force, gen)
+
+
+if __name__ == "__main__":
+    main()
