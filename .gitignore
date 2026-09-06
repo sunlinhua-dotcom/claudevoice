@@ -23,12 +23,21 @@ bridge/.device_token.*
 .cc-bridge/
 
 # 私人开发笔记 / 断点续档（不随开源发布）
+# 无斜杠的模式在任意层级生效，所以挪进 docs/archive/ 之后照样不会被提交
 LOG.md
 Progress.md
 CONTEXT.md
 bugs.md
+logs.md
 0718.md
 0721.md
+
+# Python 字节码（tools/ 与 wxbridge/ 下的脚本会生成）
+__pycache__/
+*.pyc
+
+# 每轮开工前推给飞书画布的意图图，属于会话草稿
+diagrams/
 
 # 营销工作目录（HTML 源 + @2x 构建产物；最终 PNG 已复制到 assets/）
 marketing/
