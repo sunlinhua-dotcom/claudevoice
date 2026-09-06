@@ -1,4 +1,13 @@
 import { deliveryPlan, normalizeBridgePayload } from './event-utils.mjs';
+// 播报话术层（音色分配 / 名字读法 / 句子模板 / 摘要清洗）与根目录 server.js、hook.js 共用同一份。
+// 只放纯函数，没有 I/O，所以能被 esbuild 直接打进 Worker。默认导入 —— 本地 .cjs 的具名导入在
+// esbuild 的 CJS→ESM 互操作下不可靠，拿到的只保证是 module.exports 这个对象。
+import speech from '../../shared/speech.cjs';
+const {
+  VOICE_POOL, VOICE_GENDER, humanizeName, sayTool, spaceCJK,
+  pick, hashStr, assignVoice, isMostlyChinese,
+  cleanForSpeech, pickSummary, buildStyle, extractTool, baseName, clip,
+} = speech;
 
 /**
  * ClaudeVoice — Cloudflare Worker（边缘常驻中转站）
@@ -16,12 +25,6 @@ import { deliveryPlan, normalizeBridgePayload } from './event-utils.mjs';
  *  Vars（wrangler.toml [vars]）：TTS_ENGINE, TTS_VOICE, USER_NAME
  */
 
-// 只用中文音色（英文音色读中文会变乱码）。保留男女区分。
-const VOICE_POOL = [
-  { name: '茉莉', gender: 'f' }, { name: '白桦', gender: 'm' },
-  { name: '冰糖', gender: 'f' }, { name: '苏打', gender: 'm' },
-];
-const VOICE_GENDER = VOICE_POOL.reduce((m, v) => (m[v.name] = v.gender, m), {});
 
 // 用户只认这两个称呼：主名 USER_NAME（布莱特）+ 别名 USER_ALIASES（老孙），每次随机抽一个。
 // 2026-08-25 用户明确要求：不要再加"老板/老大"之类的尊称后缀（与 server.js 同步）。
@@ -39,71 +42,6 @@ const DEFAULT_PROJECTS = (() => {
   return m;
 })();
 
-// 全大写连写常见词（Title 化）与缩写（逐字母拼读），用来切 ACERGX10 / GPTORG 这类没有大小写边界的名字。
-const CAPS_ACRONYMS = ['AI','API','CLI','CSS','DNS','ERP','GPT','GPU','HTML','HTTP','JSON','LLM','OCR','PDF','PPT','SDK','SEO','SQL','SSH','SVG','TTS','UI','URL','VPN','XML'];
-const CAPS_WORDS = ['ACER','ANDROID','APP','APPLE','AUTO','BETA','BIRD','CANVAS','CHINA','CLOUD','CUT','DEMO','DESIGN','DEV','DOCS','EDGE','FAKE','FOOD','GAME','GEO','GITHUB','HOME','HOUSE','HUB','IMAGE','INTRO','LAB','LIB','LIVE','MAIL','MEDIA','MENU','MINI','MOBILE','MONEY','MUSIC','NEWS','NEXT','NOTE','OPEN','ORG','PAGE','PHONE','PHOTO','PLAN','PLUS','PRO','PROJECT','REPORT','RESEARCH','SHOP','SITE','SKILLS','SMART','SOCIAL','STORE','STUDIO','TEAM','TECH','TEMP','TEST','TILE','TOOL','VIDEO','VIEW','VOICE','WEB','WORK'];
-const CAPS_DICT = [...CAPS_ACRONYMS, ...CAPS_WORDS].sort((a, b) => b.length - a.length);
-
-function titleCase(w) { return w.charAt(0).toUpperCase() + w.slice(1).toLowerCase(); }
-function spellOut(w) { return w.split('').join(' '); }
-
-// 把一段全大写连写按词典贪婪切开；切不动的碎片，短的拼读、长的 Title 化。
-// 一个碎片怎么念：词典里的词 Title 化，缩写逐字母拼读；
-// 剩下的看长相——太短或不含元音的当缩写拼读，否则按词读。
-function renderPiece(t) {
-  if (CAPS_WORDS.includes(t)) return titleCase(t);
-  if (CAPS_ACRONYMS.includes(t)) return spellOut(t);
-  if (t.length <= 4 || !/[AEIOU]/.test(t)) return spellOut(t);
-  return titleCase(t);
-}
-
-function speakCapsRun(run) {
-  if (CAPS_WORDS.includes(run) || CAPS_ACRONYMS.includes(run)) return renderPiece(run);
-  const parts = [];
-  let i = 0;
-  while (i < run.length) {
-    const hit = CAPS_DICT.find((w) => run.startsWith(w, i));
-    if (hit) { parts.push(hit); i += hit.length; continue; }
-    let j = i + 1;
-    while (j < run.length && !CAPS_DICT.some((w) => run.startsWith(w, j))) j++;
-    parts.push(run.slice(i, j));
-    i = j;
-  }
-  // 单字母碎片并回上一段，避免把 NEWS 切成 NEW S
-  const merged = [];
-  for (const t of parts) {
-    if (t.length === 1 && merged.length) merged[merged.length - 1] += t;
-    else merged.push(t);
-  }
-  return merged.map(renderPiece).join(' ');
-}
-
-// 文件夹名 → 可读文本。含中文直接返回；纯拉丁按分隔符/驼峰/数字边界拆，全大写段再进词典切分。
-function humanizeName(key) {
-  const raw = (key || '').toString();
-  if (!raw) return key;
-  if (/[\u4e00-\u9fff]/.test(raw)) return spaceCJK(raw);
-  const rough = raw
-    .replace(/[_\-.]+/g, ' ')
-    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
-    .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
-    .replace(/([A-Za-z])(\d)/g, '$1 $2')
-    .replace(/(\d)([A-Za-z])/g, '$1 $2')
-    .replace(/\s+/g, ' ').trim();
-  if (!rough) return key;
-  return rough
-    .split(' ')
-    .map((t) => (/^[A-Z]{2,}$/.test(t) ? speakCapsRun(t) : t))
-    .join(' ')
-    .replace(/\s+/g, ' ').trim() || key;
-}
-// 中英文之间补半角空格，念起来不会黏连
-function spaceCJK(s) {
-  return s.replace(/([\u4e00-\u9fff])([A-Za-z0-9])/g, '$1 $2')
-          .replace(/([A-Za-z0-9])([\u4e00-\u9fff])/g, '$1 $2')
-          .replace(/\s+/g, ' ').trim();
-}
-function sayTool(t) { return humanizeName(t || ''); }
 
 // 热改读音表：存在 Hub DO 里，改完立刻生效、不用重新部署。isolate 内缓存 30 秒。
 let NAMES_CACHE = { at: 0, map: null };
@@ -548,20 +486,7 @@ async function normalizeEvent(payload, env) {
   };
 }
 
-function extractTool(msg) { const m = /use\s+([A-Za-z0-9_\- ]+?)(?:[\.\(]|$)/i.exec(msg); return m ? m[1].trim() : ''; }
-function pick(a) { return a[Math.floor(Math.random() * a.length)]; }
-function hashStr(s) { let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0; return h; }
-function assignVoice(k, override) {
-  if (override && VOICE_GENDER[override]) return { name: override, gender: VOICE_GENDER[override] };
-  return VOICE_POOL[hashStr(k) % VOICE_POOL.length];
-}
 
-// 判断是否中文为主（翻译已在 Mac 端 hook.js 做；Cloudflare IP 调 Google 翻译会被 429 限流，故云端不翻）
-function isMostlyChinese(s) {
-  const cjk = (String(s).match(/[一-鿿]/g) || []).length;
-  const latin = (String(s).match(/[A-Za-z]/g) || []).length;
-  return cjk >= Math.max(4, latin);
-}
 
 // 真·总结：用 Workers AI（Llama 3.3 70B fast，免费额度内，~0.6s）读懂全文 → 一句可朗读的简体中文。
 // 失败/超时返回空串，调用方退回抽取式。
@@ -584,86 +509,21 @@ async function aiSummarize(env, text) {
   } catch (_) { return ''; }
 }
 
-// 统一格式：中文名 + 敬称 + 目录名 + 任务状态 + 具体描述
+// 统一格式：中文名 + 敬称 + 目录名 + 任务状态 + 具体描述（模板在 shared/speech.cjs）
 async function buildSpeak(env, kind, U, proj, tool, detail) {
   if (kind === 'done') return await buildDoneSpeak(env, U, proj, detail);
-  const g = `${pick(userAddresses(env, U))}，`;
-  const P = {
-    waiting: [
-      `${g}目录 ${proj} 正在等你输入，回去看一下吧。`,
-      `${g}${proj} 这边停下来，等你回话了。`,
-    ],
-    permission: tool ? [
-      `${g}目录 ${proj} 需要你授权使用 ${tool}。`,
-      `${g}${proj} 想动用 ${tool}，等你点头。`,
-    ] : [
-      `${g}目录 ${proj} 需要你确认一下。`,
-    ],
-    subagent: [`${g}${proj} 有一个子任务完成了。`],
-    notification: [`${g}${proj} 有一条新消息，留意一下。`],
-  };
-  return pick(P[kind] || P.notification);
+  return speech.buildAlertSpeak(kind, userAddresses(env, U), proj, tool);
 }
+
+// 完成播报是云端独有的一条：先让 Workers AI 真读一遍再总结，不行才退回本地那套抽取式。
 async function buildDoneSpeak(env, U, proj, detail) {
-  const g = `${pick(userAddresses(env, U))}，`;
+  const who = userAddresses(env, U);
   const raw = (detail || '').trim();
-  if (!raw || raw === '本轮任务结束。') {
-    return pick([
-      `${g}目录 ${proj} 的任务已经完成，回来看看结果吧。`,
-      `${g}${proj} 这一轮完成了，记得验收。`,
-    ]);
-  }
-  let sum = await aiSummarize(env, raw);                       // 首选：AI 真总结（读懂全文 → 一句中文）
-  if (!sum) sum = isMostlyChinese(raw) ? pickSummary(raw, 150) : ''; // AI 不可用 → 抽取式（已是中文）
-  if (!sum) return pick([                                      // 仍拿不到中文 → 定型句，绝不念英文
-    `${g}目录 ${proj} 的任务已经完成，回来看看结果吧。`,
-    `${g}${proj} 这一轮完成了，记得验收。`,
-  ]);
-  return `${g}目录 ${proj} 的任务完成了。具体是，${sum}`;
-}
-const DECISION_RE = /[?？]|是否|还是|要不要|需不需要|需要你|请你确认|请确认|建议|你来定|你决定|你看|选择|二选一|哪一个|哪个|可以吗|对吗|要不/;
-// 从最后回复里抽「适合朗读的总结」：按整句累加到 maxLen，结论在前、需要定夺的句子保证念到，
-// 永远在句子边界收尾（不切半句、不拖省略号），解决「念一小段突然没了」。
-function pickSummary(detail, maxLen) {
-  const t = cleanForSpeech(detail || '', 2000);
-  if (!t) return '';
-  const sents = t.split(/(?<=[。！？!?])/).map((s) => s.trim()).filter(Boolean);
-  if (!sents.length) return '';
-  let out = '';
-  for (const s of sents) {
-    if (out.length + s.length > maxLen && out.length > 0) break;
-    out += s;
-  }
-  if (!out) {
-    const s = sents[0].slice(0, maxLen);
-    const lp = Math.max(s.lastIndexOf('，'), s.lastIndexOf('。'), s.lastIndexOf('、'), s.lastIndexOf('；'));
-    out = (lp > maxLen * 0.5 ? s.slice(0, lp) : s) + '。';
-  }
-  const dec = sents.find((s) => DECISION_RE.test(s));
-  if (dec && out.indexOf(dec) < 0 && out.length + dec.length <= maxLen + 80) out += dec;
-  return out;
-}
-function capSpeech(s, n) {
-  s = (s || '').trim(); if (s.length <= n) return s;
-  const c = s.slice(0, n);
-  const lp = Math.max(c.lastIndexOf('。'), c.lastIndexOf('！'), c.lastIndexOf('？'), c.lastIndexOf('，'));
-  return (lp > n * 0.5 ? c.slice(0, lp + 1) : c) + '……';
-}
-function cleanForSpeech(text, maxLen) {
-  let s = (text || '').toString()
-    .replace(/```[\s\S]*?```/g, ' ').replace(/`[^`]*`/g, ' ')
-    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1')
-    .replace(/[*_#>~|]/g, ' ').replace(/^[\s\-•\d.]+/gm, '')
-    .replace(/\s+/g, ' ').trim();
-  if (s.length <= maxLen) return s;
-  const cut = s.slice(0, maxLen);
-  const lp = Math.max(cut.lastIndexOf('。'), cut.lastIndexOf('！'), cut.lastIndexOf('？'), cut.lastIndexOf('.'), cut.lastIndexOf('，'));
-  return (lp > maxLen * 0.5 ? cut.slice(0, lp + 1) : cut) + '……';
-}
-function buildStyle(kind) {
-  // 保持简短：风格指令越短越干净，过长会被 TTS 当成内容念进去导致乱码
-  const tones = ['语气自然亲切。', '语气干练利落。', '温柔地提醒。', '沉稳地说。', '稍微轻快一点。', '带一点期待。'];
-  return pick(tones);
+  if (!raw || raw === '本轮任务结束。') return speech.doneFallback(who, proj);
+  let sum = await aiSummarize(env, raw);                              // 首选：AI 真总结（读懂全文 → 一句中文）
+  if (!sum) sum = isMostlyChinese(raw) ? pickSummary(raw, 150) : '';  // AI 不可用 → 抽取式（已是中文）
+  if (!sum) return speech.doneFallback(who, proj);                    // 仍拿不到中文 → 定型句，绝不念英文
+  return speech.doneWithSummary(who, proj, sum);
 }
 
 // ============================ TTS 代理（edge 首选 → azure 兜底）============================
@@ -816,7 +676,5 @@ async function vapidAuth(env, endpoint) {
 // ============================ 工具 ============================
 function sse(obj) { return 'data: ' + JSON.stringify(obj) + '\n\n'; }
 function jsonResp(o, status, cors) { return new Response(JSON.stringify(o), { status, headers: { ...(cors || {}), 'content-type': 'application/json; charset=utf-8' } }); }
-function baseName(p) { if (!p) return ''; return p.replace(/[\/\\]+$/, '').split(/[\/\\]/).pop(); }
-function clip(s, n) { s = (s || '').toString(); return s.length > n ? s.slice(0, n) + '…' : s; }
 function b64urlStr(s) { return b64urlBytes(new TextEncoder().encode(s)); }
 function b64urlBytes(bytes) { let bin = ''; for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]); return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); }

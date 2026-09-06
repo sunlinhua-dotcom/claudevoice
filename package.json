@@ -5,6 +5,7 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
+    "test": "node --test test/*.test.mjs",
     "setup": "node setup.js",
     "uninstall-hooks": "node setup.js --remove"
   },

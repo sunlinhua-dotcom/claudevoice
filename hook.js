@@ -18,6 +18,9 @@ const os = require('os');
 const path = require('path');
 const http = require('http');
 const https = require('https');
+// 名字读法 / 中文判定这类纯逻辑与 server.js、cloudflare/src/worker.js 共用一份（shared/speech.cjs），
+// 免得同一套规则在三个文件里各漂各的。
+const { isMostlyChinese, humanizeName: humanize, baseName } = require('./shared/speech.cjs');
 const { URL } = require('url');
 const { spawn } = require('child_process');
 
@@ -75,11 +78,6 @@ function forward(body) {
 }
 
 // 中文为主判定 + 免 key Google 翻译（本机可访问；失败回调空串，调用方退回原文）
-function isMostlyChinese(s) {
-  const cjk = (String(s).match(/[一-鿿]/g) || []).length;
-  const latin = (String(s).match(/[A-Za-z]/g) || []).length;
-  return cjk >= Math.max(4, latin);
-}
 function translateToZh(text, cb) {
   let done = false;
   const finish = (v) => { if (done) return; done = true; cb(v); };
@@ -348,17 +346,6 @@ function decodeClaudePath(enc) {
   return cur === '/' ? '' : cur;
 }
 
-// 文件夹名拆词（与 server.js humanizeName 同）
-function humanize(key) {
-  return (key || '')
-    .replace(/[_\-.]+/g, ' ')
-    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
-    .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
-    .replace(/([A-Za-z])(\d)/g, '$1 $2')
-    .replace(/(\d)([A-Za-z])/g, '$1 $2')
-    .replace(/\s+/g, ' ').trim() || key;
-}
-function baseName(p) { return p ? p.replace(/[\/\\]+$/, '').split(/[\/\\]/).pop() : ''; }
 
 // 读 transcript（JSONL）尾部 512KB 的行（最后几条记录足够）；读不了返回 null
 function tailLines(p) {
