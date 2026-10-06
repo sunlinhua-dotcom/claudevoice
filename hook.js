@@ -40,18 +40,34 @@ try {
 url = url || 'http://127.0.0.1:8787/hook';
 
 // 读 stdin
-let raw = '';
-process.stdin.setEncoding('utf8');
-process.stdin.on('data', (c) => { raw += c; });
-process.stdin.on('end', () => forward(raw));
-// 兜底：stdin 没数据时也别卡死
-setTimeout(() => { if (!raw) forward('{}'); }, 1500);
+// 两种运行模式（同一个脚本）：
+//   主进程（Claude Code 同步调起）：读 stdin → 本地过滤 / 判断 / 弹横幅 / iMessage 深链 →
+//     把「翻译 + POST + 读回包 + enqueueDesktop」整包交给脱离的子进程 → 立刻 exit(0)。
+//   子进程（argv[2] === --cv-detached）：自己重新读配置拿 URL 和 secret，从 stdin 管道收 job，
+//     做完网络活后退出。secret 不进 argv / 环境变量 / 日志 / 临时文件。
+const DETACHED_FLAG = '--cv-detached';
+const MAIN_NET_TIMEOUT = 8000;       // 子进程起不来、退回进程内直发时沿用的旧超时
+const DETACHED_NET_TIMEOUT = 20000;  // 脱离后没人在等，网络超时放宽
+
+if (process.argv[2] === DETACHED_FLAG) runDetached();
+else {
+  let forwarded = false;
+  const once = (b) => { if (forwarded) return; forwarded = true; forward(b); };
+  let raw = '';
+  process.stdin.setEncoding('utf8');
+  process.stdin.on('data', (c) => { raw += c; });
+  process.stdin.on('end', () => once(raw));
+  process.stdin.on('error', () => once(raw));
+  // 兜底：stdin 没数据时也别卡死
+  setTimeout(() => { if (!raw) once('{}'); }, 1500);
+}
 
 function forward(body) {
   // hook_event_name 兜底用 argv；Mac 端读 transcript 末句带上（Worker 读不到本机文件）。
-  // 关键：末句若是英文，在本机（能访问 Google）翻成中文再发——Worker 那边 Cloudflare IP 会被 Google 429。
+  // 关键：末句若是英文，要翻成中文再发（本机能访问 Google，Worker 那边 Cloudflare IP 会被 Google 429）；
+  // 翻译是网络活，和 POST 一起交给脱离的子进程做，主进程不等。
   let obj;
-  try { obj = JSON.parse(body || '{}'); } catch (_) { return postBody(body); }
+  try { obj = JSON.parse(body || '{}'); } catch (_) { return dispatch({ body }); }
   // BRIGHT 的通知口径（2026-08-30）：CloudCLI 网页会话不往飞书推卡（人在网页前，卡是噪音），
   // 桌面/其他会话照推；CLAUDEVOICE_LARK=1 强制恢复推送。
   if (process.env.CLAUDEVOICE_LARK === '1') delete obj.noLark;
@@ -66,15 +82,74 @@ function forward(body) {
     if (prev) {
       if (isMostlyChinese(prev)) {
         obj.cv_preview = prev.slice(0, 520);
-        return postBody(JSON.stringify(obj));
+        return dispatch({ body: JSON.stringify(obj) });
       }
-      return translateToZh(prev.slice(0, 1500), (zh) => {   // 英文末句 → 本机翻成中文
-        obj.cv_preview = (zh && isMostlyChinese(zh) ? zh : prev).slice(0, 520);
-        postBody(JSON.stringify(obj));
-      });
+      // 英文末句：子进程翻成中文后写进 cv_preview（失败退回原文），这里不等
+      return dispatch({ body: JSON.stringify(obj), tr: prev.slice(0, 1500) });
     }
   }
-  postBody(JSON.stringify(obj));
+  dispatch({ body: JSON.stringify(obj) });
+}
+
+// 把 job（{ body, tr? }）交给脱离的子进程：detached + stdio 不继承 + unref，job 走 stdin 管道，
+// 管道写完主进程立刻退出。子进程起不来（spawn 抛错 / error 事件）才退回进程内直发，保证旧行为不丢。
+function dispatch(job) {
+  let settled = false;
+  let guard = null;
+  const inline = () => {
+    if (settled) return;
+    settled = true;
+    if (guard) clearTimeout(guard);
+    runJob(job, MAIN_NET_TIMEOUT, () => process.exit(0));
+  };
+  try {
+    const child = spawn(process.execPath, [__filename, DETACHED_FLAG], {
+      detached: true,
+      stdio: ['pipe', 'ignore', 'ignore'],   // stdout/stderr 不继承：否则 Claude Code 会等到子进程关掉管道
+      windowsHide: true,
+    });
+    child.on('error', inline);
+    child.unref();
+    child.stdin.on('error', () => {});       // 子进程提前死了会 EPIPE，吞掉
+    child.stdin.end(JSON.stringify(job), () => {
+      if (settled) return;
+      settled = true;
+      process.exit(0);
+    });
+    // 超大 payload（> 管道缓冲）要等子进程读走；子进程卡住也最多再等 3 秒，永不拖住 Claude
+    guard = setTimeout(() => { settled = true; process.exit(0); }, 3000);
+  } catch (_) { inline(); }
+}
+
+// 子进程入口：从 stdin 收 job → 做网络活 → 退出。没有任何输出，也不写日志。
+function runDetached() {
+  let buf = '';
+  process.stdin.setEncoding('utf8');
+  process.stdin.on('data', (c) => { buf += c; });
+  process.stdin.on('error', () => process.exit(0));
+  process.stdin.on('end', () => {
+    let job;
+    try { job = JSON.parse(buf); } catch (_) { process.exit(0); }
+    runJob(job, DETACHED_NET_TIMEOUT, () => process.exit(0));
+  });
+  setTimeout(() => process.exit(0), DETACHED_NET_TIMEOUT + 10000);   // 总上限：翻译 + POST 都挂死也自己退
+}
+
+// 翻译（若需要）→ POST → 读回包 → enqueueDesktop。done 恰好调用一次。
+function runJob(job, timeoutMs, done) {
+  try {
+    if (!job || typeof job.body !== 'string') return done();
+    if (!job.tr) return postBody(job.body, timeoutMs, done);
+    return translateToZh(job.tr, (zh) => {
+      let out = job.body;
+      try {
+        const o = JSON.parse(job.body);
+        o.cv_preview = (zh && isMostlyChinese(zh) ? zh : job.tr).slice(0, 520);
+        out = JSON.stringify(o);
+      } catch (_) {}
+      postBody(out, timeoutMs, done);
+    });
+  } catch (_) { done(); }
 }
 
 // 中文为主判定 + 免 key Google 翻译（本机可访问；失败回调空串，调用方退回原文）
@@ -100,9 +175,11 @@ function translateToZh(text, cb) {
   } catch (_) { finish(''); }
 }
 
-function postBody(body) {
+function postBody(body, timeoutMs, done) {
+  let called = false;
+  const finish = () => { if (called) return; called = true; done(); };
   let target;
-  try { target = new URL(url); } catch (_) { process.exit(0); }
+  try { target = new URL(url); } catch (_) { return finish(); }
   const lib = target.protocol === 'https:' ? https : http;
   const data = Buffer.from(body, 'utf8');
   const req = lib.request({
@@ -125,12 +202,13 @@ function postBody(body) {
           if (j && j.event) enqueueDesktop(j.event);
         }
       } catch (_) {}
-      process.exit(0);
+      finish();
     });
+    res.on('error', finish);
   });
 
-  req.on('error', () => process.exit(0));
-  req.setTimeout(8000, () => { req.destroy(); process.exit(0); });
+  req.on('error', finish);
+  req.setTimeout(timeoutMs, () => { req.destroy(); finish(); });
   req.write(data);
   req.end();
 }

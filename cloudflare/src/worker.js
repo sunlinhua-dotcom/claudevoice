@@ -1,4 +1,7 @@
 import { deliveryPlan, normalizeBridgePayload } from './event-utils.mjs';
+import { ttsParams, ttsCacheHash, ttsCacheUrl, ttsContentType, MemoryAudioCache, TTS_PROSODY, TTS_CACHE_TTL_SEC } from './tts-cache.mjs';
+import { AttemptLimiter, UNLOCK_LIMIT, clientKey, makeCacheStore } from './rate-limit.mjs';
+import { fanoutWrite } from './sse-fanout.mjs';
 // 播报话术层（音色分配 / 名字读法 / 句子模板 / 摘要清洗）与根目录 server.js、hook.js 共用同一份。
 // 只放纯函数，没有 I/O，所以能被 esbuild 直接打进 Worker。默认导入 —— 本地 .cjs 的具名导入在
 // esbuild 的 CJS→ESM 互操作下不可靠，拿到的只保证是 module.exports 这个对象。
@@ -70,6 +73,14 @@ async function resolveProject(projectKey, env) {
   };
 }
 
+// caches.default：自定义域名 / 本地 wrangler dev 可用；workers.dev 上官方不保证，拿不到就返回 null，调用方走内存兜底。
+function edgeCache() {
+  try { return typeof caches !== 'undefined' && caches.default ? caches.default : null; } catch (_) { return null; }
+}
+
+// /unlock 限流器：isolate 内存（原子）+ caches.default（尽力跨 isolate）。不碰 DO。
+const unlockLimiter = new AttemptLimiter({ ...UNLOCK_LIMIT, store: makeCacheStore(edgeCache, 'https://unlock-rl.internal/') });
+
 export default {
   async fetch(req, env, ctx) {
     const url = new URL(req.url);
@@ -84,13 +95,19 @@ export default {
     if (p === '/health') return jsonResp({ ok: true }, 200, cors);
 
     // 用密码换 token：输对密码就种一个长期 cookie，之后免输（解决"加到主屏幕后没处输 token"的死循环）
+    // 防爆破：按 CF-Connecting-IP 计数，10 分钟内错 5 次锁 10 分钟（429）。限流不走 DO，见 src/rate-limit.mjs 顶部说明。
     if (p === '/unlock' && req.method === 'POST') {
       let pw = '';
       try { const b = await req.json(); pw = ((b && b.pw) || '').toString().trim(); } catch (_) {}
       const expected = (env.UNLOCK_PASSWORD || '').toString();
       // 未配置 UNLOCK_PASSWORD 时不放行（无内置默认密码）。
-      if (env.DASH_TOKEN && expected && pw && pw === expected) {
+      const r = await unlockLimiter.attempt(clientKey(req.headers.get('cf-connecting-ip')), () => !!(env.DASH_TOKEN && expected && pw && pw === expected));
+      if (r.pending) ctx.waitUntil(r.pending);
+      if (r.result === 'ok') {
         return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { ...cors, 'content-type': 'application/json', 'set-cookie': `cv_token=${env.DASH_TOKEN}; Max-Age=31536000; Path=/; Secure; HttpOnly; SameSite=Lax` } });
+      }
+      if (r.result === 'locked') {
+        return new Response(JSON.stringify({ ok: false, locked: true, retryAfter: r.retryAfter }), { status: 429, headers: { ...cors, 'content-type': 'application/json', 'retry-after': String(r.retryAfter) } });
       }
       return new Response(JSON.stringify({ ok: false }), { status: 401, headers: { ...cors, 'content-type': 'application/json' } });
     }
@@ -165,7 +182,7 @@ export default {
     if (p === '/tts' && req.method === 'POST') {
       const secOK = env.HOOK_SECRET && req.headers.get('x-cv-secret') === env.HOOK_SECRET;
       if (!tokOK && !secOK) return jsonResp({ error: 'token required' }, 401, cors);
-      return handleTts(req, env, cors);
+      return handleTts(req, env, cors, ctx);
     }
     if (p === '/config') {
       return jsonResp({
@@ -200,7 +217,7 @@ export default {
         + `f.onsubmit=function(e){e.preventDefault();err.textContent='';var v=(pw.value||'').trim();if(!v)return;`
         + `fetch('/unlock',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pw:v})})`
         + `.then(function(r){return r.json().catch(function(){return{ok:false};});})`
-        + `.then(function(j){if(j&&j.ok){location.replace('/');}else{err.textContent='密码不对，再试一次';pw.value='';pw.focus();}})`
+        + `.then(function(j){if(j&&j.ok){location.replace('/');}else{err.textContent=(j&&j.locked)?('尝试次数过多，请 '+Math.max(1,Math.ceil((j.retryAfter||600)/60))+' 分钟后再试'):'密码不对，再试一次';pw.value='';pw.focus();}})`
         + `.catch(function(){err.textContent='网络出错，重试一次';});};pw.focus();</script></body></html>`;
       return new Response(html, { status: 200, headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' } });
     }
@@ -328,10 +345,8 @@ export class Hub {
     while (this.recent.length > 100) this.recent.shift();
     await this.state.storage.put('recent', this.recent.slice(-60));
     const msg = sse({ type: 'event', event: ev });
-    for (const [id, w] of this.writers) {
-      try { await w.write(this.enc.encode(msg)); }
-      catch (_) { this.writers.delete(id); }
-    }
+    // 不再 await 单个 writer：连着但不读的 SSE 客户端会让 write 永远挂起，拖住整条广播和后面的推送
+    fanoutWrite(this.writers, () => this.enc.encode(msg));
     const wmsg = JSON.stringify({ type: 'event', event: ev });
     for (const ws of this.state.getWebSockets()) {
       try { ws.send(wmsg); } catch (_) {}
@@ -440,16 +455,17 @@ export class Hub {
     try { await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }); } catch (_) {}
   }
 
+  // SSE 保活闹钟：只有还挂着 SSE writer 时才存在。WebSocket 不需要它（休眠 + 自动 ping/pong）。
   async ensureAlarm() {
-    const cur = await this.state.storage.getAlarm();
-    if (cur == null) this.state.storage.setAlarm(Date.now() + 20000);
+    try {
+      const cur = await this.state.storage.getAlarm();
+      if (cur == null) await this.state.storage.setAlarm(Date.now() + 20000);
+    } catch (e) { console.log('ensureAlarm 失败: ' + String(e)); }
   }
   async alarm() {
-    for (const [id, w] of this.writers) {
-      try { await w.write(this.enc.encode(': ka\n\n')); }
-      catch (_) { this.writers.delete(id); }
-    }
-    if (this.writers.size > 0) this.state.storage.setAlarm(Date.now() + 20000);
+    // fanoutWrite 返回仍挂着的 writer 数；断开 / 卡死的先摘掉，没有活 writer 就不再续闹钟
+    const alive = fanoutWrite(this.writers, () => this.enc.encode(': ka\n\n'));
+    if (alive > 0) await this.state.storage.setAlarm(Date.now() + 20000);
   }
 
   async addSub(sub) {
@@ -642,7 +658,7 @@ async function edgeSynthW(text, voice, format) {
     const ts = new Date().toString();
     const cfg = `X-Timestamp:${ts}\r\nContent-Type:application/json; charset=utf-8\r\nPath:speech.config\r\n\r\n` +
       JSON.stringify({ context: { synthesis: { audio: { metadataoptions: { sentenceBoundaryEnabled: 'false', wordBoundaryEnabled: 'false' }, outputFormat: fmt } } } });
-    const ssml = `<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' xml:lang='zh-CN'><voice name='${v}'><prosody pitch='+0Hz' rate='+0%' volume='+0%'>${escXmlW(text)}</prosody></voice></speak>`;
+    const ssml = `<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' xml:lang='zh-CN'><voice name='${v}'><prosody pitch='${TTS_PROSODY.pitch}' rate='${TTS_PROSODY.rate}' volume='${TTS_PROSODY.volume}'>${escXmlW(text)}</prosody></voice></speak>`;
     ws.send(cfg);
     ws.send(`X-RequestId:${connId}\r\nContent-Type:application/ssml+xml\r\nX-Timestamp:${ts}Z\r\nPath:ssml\r\n\r\n${ssml}`);
   });
@@ -666,13 +682,11 @@ function ttsOrderW(env) {
   return env.AZURE_SPEECH_KEY && env.AZURE_SPEECH_REGION ? ['edge', 'azure'] : ['edge'];
 }
 
-async function handleTts(req, env, cors) {
-  let body = {};
-  try { body = await req.json(); } catch (_) {}
-  const text = (body.text || '').toString().slice(0, 800);
-  if (!text) return jsonResp({ error: 'text 必填' }, 400, cors);
-  const voice = (body.voice || env.TTS_VOICE || '茉莉').toString();
-  const format = body.format === 'wav' ? 'wav' : 'mp3';
+// /tts 缓存：isolate 内存 LRU → caches.default → 现合成。key = SHA-256(文本 + 解析后的音色 + 格式 + 韵律参数)，
+// 原文不进 URL。只缓存合成成功的非空音频；鉴权在路由层已经做完，这里只管缓存。
+const ttsMem = new MemoryAudioCache();
+
+async function synthTts(text, voice, format, env) {
   let lastErr = '';
   for (const eng of ttsOrderW(env)) {
     try {
@@ -681,10 +695,67 @@ async function handleTts(req, env, cors) {
         return azureSynthW(text, voice, format, env);
       });
       assertAudioW(bytes, eng);
-      return new Response(bytes, { headers: { ...cors, 'content-type': format === 'wav' ? 'audio/wav' : 'audio/mpeg', 'cache-control': 'public, max-age=86400' } });
+      return bytes;
     } catch (e) { lastErr = String((e && e.message) || e); console.log('TTS ' + eng + ' 失败: ' + lastErr); }
   }
-  return jsonResp({ error: 'TTS 失败', detail: lastErr }, 502, cors);
+  const err = new Error(lastErr || 'TTS 失败');
+  err.ttsFailed = true;
+  throw err;
+}
+
+async function handleTts(req, env, cors, ctx) {
+  let body = {};
+  try { body = await req.json(); } catch (_) {}
+  const text = (body.text || '').toString().slice(0, 800);
+  if (!text) return jsonResp({ error: 'text 必填' }, 400, cors);
+  const voice = (body.voice || env.TTS_VOICE || '茉莉').toString();
+  const format = body.format === 'wav' ? 'wav' : 'mp3';
+  const ct = ttsContentType(format);
+  // x-cv-tts-cache: hit | miss；命中时 x-cv-tts-tier: mem（isolate 内存）| edge（caches.default）——
+  // 线上看到 edge 说明 Cache API 在当前域名上真的生效，只见 mem 说明它没生效（workers.dev 上官方不保证）。
+  const reply = (bytes, state, tier) => new Response(bytes, { headers: {
+    ...cors, 'Access-Control-Expose-Headers': 'x-cv-tts-cache, x-cv-tts-tier',
+    'content-type': ct, 'cache-control': `public, max-age=${TTS_CACHE_TTL_SEC}`, 'x-cv-tts-cache': state,
+    ...(tier ? { 'x-cv-tts-tier': tier } : {}),
+  } });
+
+  let hash = '';
+  try { hash = await ttsCacheHash(ttsParams({ text, voice: resolveVoiceEdge(voice), format })); } catch (e) { console.log('tts cache key 失败: ' + String(e)); }
+  const cache = hash ? edgeCache() : null;
+  const keyReq = hash ? new Request(ttsCacheUrl(hash)) : null;
+
+  if (hash) {
+    const m = ttsMem.get(hash);
+    if (m) return reply(m.bytes, 'hit', 'mem');
+    if (cache) {
+      try {
+        const c = await cache.match(keyReq);
+        if (c) {
+          const bytes = new Uint8Array(await c.arrayBuffer());
+          if (bytes.byteLength) { ttsMem.set(hash, bytes, ct); return reply(bytes, 'hit', 'edge'); }
+        }
+      } catch (e) { console.log('tts cache 读取失败: ' + String(e)); }
+    }
+  }
+
+  const synthAndStore = async () => {
+    const bytes = await synthTts(text, voice, format, env);
+    if (hash) {
+      ttsMem.set(hash, bytes, ct);
+      if (cache) {
+        const put = cache.put(keyReq, new Response(bytes, { headers: { 'content-type': ct, 'cache-control': `public, max-age=${TTS_CACHE_TTL_SEC}` } }))
+          .catch((e) => console.log('tts cache 写入失败: ' + String(e)));
+        if (ctx && ctx.waitUntil) ctx.waitUntil(put);
+      }
+    }
+    return bytes;
+  };
+  try {
+    const bytes = hash ? await ttsMem.once(hash, synthAndStore) : await synthAndStore();
+    return reply(bytes, 'miss');
+  } catch (e) {
+    return jsonResp({ error: 'TTS 失败', detail: String((e && e.message) || e) }, 502, cors);
+  }
 }
 
 async function retryTtsW(engine, synth) {

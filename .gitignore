@@ -5,6 +5,7 @@ projects.json
 node_modules/
 *.bak
 *.bak.*
+*.bak-*
 *.opensource-bak
 .DS_Store
 

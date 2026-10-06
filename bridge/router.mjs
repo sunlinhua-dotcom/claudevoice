@@ -160,7 +160,8 @@ export function createCardActionHandler({ ownerId, controller, log = console }) 
       continue: '下一条消息将续接此会话', retry: '已安排重试',
       'cc.inject.paste': '正在粘贴', 'cc.inject.enter': '正在回车', 'cc.inject.claude': '正在转给 Claude',
       'cc.inject.mode': '正在切换模式', 'cc.inject.convert': '正在改为电脑输入',
-      'cc.attachment.paste': '正在粘贴附件', 'cc.attachment.claude': '正在转给 Claude',
+      'cc.attachment.paste': '正在重新粘贴', 'cc.attachment.claude': '正在转给 Claude',
+      'cc.attachment.enter': '正在回车发送', 'cc.attachment.flush': '马上贴',
     }[value.act || value.ns] || '已接收';
     return { toast: { type: 'success', content } };
   };

@@ -72,6 +72,7 @@ final class Player {
     let queue = OperationQueue()
     var muted = false
     var idle = true   // 队列空闲标志：一波密集事件里只在第一条放音效，避免音效连发像警报
+    var isBusy: () -> Bool = { false }   // 跟盒子同步念的正在放（BoxSync），本机这条先等着，不叠音
     let cfg: AppConfig
     init(_ c: AppConfig) { cfg = c; queue.maxConcurrentOperationCount = 1 }
 
@@ -87,6 +88,8 @@ final class Player {
         if muted { return }
         guard let speak = ev["speak"] as? String, !speak.isEmpty else { return }
         let knd = ev["kind"] as? String ?? ""
+        var waited = 0.0
+        while isBusy() && waited < 180 { Thread.sleep(forTimeInterval: 0.2); waited += 0.2 }
         if idle { idle = false; chime(knd, ev["projectKey"] as? String ?? "") }   // 一波里只第一条放音效
         else { appLog("音效跳过·密集事件 [\(knd)]") }
         guard let data = fetchTTS(text: speak, voice: ev["voice"] as? String ?? "", style: ev["style"] as? String ?? "") else { return }
@@ -170,9 +173,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var player: Player!
     var watcher: QueueWatcher!
     let cfg = appConfig()
+    let boxSync = BoxSync()
     var recent: [[String: Any]] = []
     private let relayClient = RelayClient()
     private let injector = TextInjector()
+    private let itemPaster = ItemPaster()
     private let defaults = UserDefaults.standard
     private var llmOn = true
     private var pairingWC: PairingWindowController?
@@ -208,10 +213,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
             self.recordRecent(ev)
             NameAsk.shared.consider(ev)     // 没进读音表的新项目 → 弹通知问读音
+            if self.boxSync.covers(ev) {
+                // 盒子那边会念同一份（上海话、合并过的），Mac 跟着一起念，本机不再自己合成
+                appLog("交给盒子同步念: \(ev["project"] ?? "?") \(ev["kind"] ?? "?")")
+                self.boxSync.hold { [weak self] in self?.player.enqueue(ev, delete: nil) }
+                try? FileManager.default.removeItem(atPath: path)
+                return
+            }
             appLog("queued: \(ev["project"] ?? "?") \(ev["kind"] ?? "?")")
             self.player.enqueue(ev, delete: path)
         }
         watcher.start()
+        player.isBusy = { [weak self] in self?.boxSync.playing ?? false }
+        boxSync.isMuted = { [weak self] in self?.player.muted ?? false }
+        boxSync.start()
         setupRemoteInput()
     }
 
@@ -313,6 +328,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         let mute = NSMenuItem(title: player.muted ? "🔔 取消静音" : "🔕 静音", action: #selector(toggleMute), keyEquivalent: "")
         mute.target = self; menu.addItem(mute)
+        if boxSync.config != nil {
+            let title = boxSync.enabled ? "🔗 跟盒子同步念 ✓（\(boxSync.statusText)）" : "🔗 跟盒子同步念"
+            let sync = NSMenuItem(title: title, action: #selector(toggleBoxSync), keyEquivalent: ""); sync.target = self; menu.addItem(sync)
+        }
         let test = NSMenuItem(title: "▶ 测试播报", action: #selector(testSpeak), keyEquivalent: ""); test.target = self; menu.addItem(test)
         let panel = NSMenuItem(title: "🖥 打开网页面板", action: #selector(openPanel), keyEquivalent: ""); panel.target = self; menu.addItem(panel)
         let login = NSMenuItem(title: loginOn() ? "🚀 开机自启 ✓" : "🚀 开机自启", action: #selector(toggleLogin), keyEquivalent: ""); login.target = self; menu.addItem(login)
@@ -358,6 +377,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
     @objc func askPendingName() { NameAsk.shared.askNext() }
     @objc func toggleMute() { player.muted.toggle() }
+    @objc func toggleBoxSync() { boxSync.enabled.toggle() }
     @objc func testSpeak() {
         let ev: [String: Any] = ["speak": "这是一条测试播报，语音清晰、顺序播放。", "voice": "茉莉", "style": "语气自然。", "kind": "done", "project": "测试", "ts": Date().timeIntervalSince1970 * 1000, "detail": "点菜单里的测试播报触发。"]
         recordRecent(ev); player.enqueue(ev, delete: nil)
@@ -490,6 +510,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     self.relayClient.send(["type": "inject_ack", "id": injectId, "ok": outcome.ok, "mode": outcome.mode])
                 }
             case .key(let key, let injectId):
+                // 「cv:」开头的是飞书附件 / 文字粘贴指令，交给 ItemPaster 在后台队列里逐项贴，贴完再回执。
+                if let command = ItemPaster.parse(key) {
+                    let op = command["op"] as? String ?? "-"
+                    self.itemPaster.run(command) { result in
+                        DispatchQueue.main.async {
+                            if result.ok {
+                                DictationHUD.shared.showFinal(op == "paste_items" ? "🖼 已贴 \(result.pasted) 项" : "📋 已粘贴")
+                            } else {
+                                DictationHUD.shared.showFinal("⚠️ 只贴了 \(result.pasted)/\(result.total)：\(result.reason)")
+                            }
+                            appLog("remote paste id=\(injectId ?? "-") op=\(op) pasted=\(result.pasted)/\(result.total) app=\(result.app) reason=\(result.reason)")
+                            if let injectId {
+                                self.relayClient.send(["type": "inject_ack", "id": injectId, "ok": result.ok, "mode": result.ackMode])
+                            }
+                        }
+                    }
+                    return
+                }
                 let outcome = self.injector.pressKey(key)
                 if outcome.mode == "type" {
                     DictationHUD.shared.showFinal(key.lowercased().contains("paste") ? "📋 已粘贴" : "⏎ 回车")

@@ -18,6 +18,7 @@ const DEFAULT_STATE = {
   tasks: {},
   messageToTask: {},
   inputDeliveries: {},
+  batchSeq: 0,
   settings: { mode: 'default', model: '', inputMode: 'input' },
   resumeNext: {},
   sessionMenus: {},
@@ -403,12 +404,12 @@ export class SessionStore extends EventEmitter {
 
   async createInputDelivery({
     text, messageId, origin = 'text', postprocess = false, stoppedTaskNumber = 0,
-    attachments = [], prompt = '', project = '',
+    attachments = [], prompt = '', project = '', kind = '',
   }) {
     const now = Date.now();
     const delivery = {
       id: id('inject_'),
-      kind: attachments.length ? 'attachment' : 'text',
+      kind: kind || (attachments.length ? 'attachment' : 'text'),
       text: String(text || ''),
       prompt: String(prompt || ''),
       project: String(project || ''),
@@ -432,6 +433,12 @@ export class SessionStore extends EventEmitter {
     for (const stale of values.slice(200)) delete this.state.inputDeliveries[stale.id];
     await this.save();
     return delivery;
+  }
+
+  /** 附件批次号，同步递增；随下一次 save 落盘。 */
+  nextBatchNumber() {
+    this.state.batchSeq = (Number(this.state.batchSeq) || 0) + 1;
+    return this.state.batchSeq;
   }
 
   getInputDelivery(deliveryId) {

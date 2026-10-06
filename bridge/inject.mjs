@@ -96,6 +96,8 @@ async function verifyClipboard(kind, { spawnImpl = spawn } = {}) {
   return clipboardInfo;
 }
 
+// 只在桌面会话里可用：PM2 开机拉起的 cc-bridge 没有剪贴板，生产路径改由电脑端 ClaudeVoice 粘贴（见 pasteItems）。
+// 保留给手动跑的 e2e 脚本。
 export async function writeAttachmentsToClipboard(attachments, { spawnImpl = spawn } = {}) {
   const items = (attachments || []).filter((item) => item?.path);
   if (!items.length) throw new Error('没有可写入剪贴板的附件文件');
@@ -118,6 +120,50 @@ export async function writeAttachmentsToClipboard(attachments, { spawnImpl = spa
   };
 }
 
+/** cc-bridge 由 PM2 在后台拉起，没有桌面会话也就没有剪贴板；贴图 / 贴文字交给电脑端 ClaudeVoice。
+ *  指令搭中继的 inject_key 通道（中继对 key 原样转发）：key = "cv:" + JSON。
+ *  中继只透传 inject_ack 的 id / ok / mode，所以 App 把结果塞进 mode："cv:" + {pasted,total,app,reason}。 */
+export const MAC_COMMAND_PREFIX = 'cv:';
+
+export function buildMacCommand(op, payload = {}) {
+  return `${MAC_COMMAND_PREFIX}${JSON.stringify({ op, ...payload })}`;
+}
+
+const RELAY_REASONS = {
+  mac_offline: '电脑端 ClaudeVoice 不在线',
+  no_room: '中继里找不到这台电脑的配对',
+  empty: '指令为空',
+};
+
+/** 注入 / 按键没成功时给人看的原因。 */
+export function describeRelayFailure(result) {
+  if (result?.unconfirmed) return '电脑端没有回执';
+  if (result?.reason) return RELAY_REASONS[result.reason] || String(result.reason);
+  if (result?.mode === 'failed') return '电脑端执行失败：可能缺辅助功能权限，或正处在密码输入状态';
+  return '电脑端未确认';
+}
+
+/** 把 inject_result 读成贴图结果。旧版 App 不认识 cv: 指令时会回 mode=failed。 */
+export function readMacPasteResult(result, total = 0) {
+  const base = { ok: false, unconfirmed: false, pasted: 0, total, app: '', reason: '' };
+  if (result?.unconfirmed) return { ...base, unconfirmed: true, reason: '电脑端没有回执' };
+  const mode = String(result?.mode || '');
+  if (mode.startsWith(MAC_COMMAND_PREFIX)) {
+    try {
+      const value = JSON.parse(mode.slice(MAC_COMMAND_PREFIX.length));
+      const pasted = Math.max(0, Number(value.pasted) || 0);
+      const count = Math.max(0, Number(value.total) || total);
+      return {
+        ...base, ok: Boolean(result.ok) && count > 0 && pasted === count,
+        pasted, total: count, app: String(value.app || ''), reason: String(value.reason || ''),
+      };
+    } catch {}
+  }
+  if (result?.reason) return { ...base, reason: RELAY_REASONS[result.reason] || String(result.reason) };
+  return { ...base, reason: '电脑端 ClaudeVoice 没执行粘贴：版本太旧需要重装，或缺辅助功能权限' };
+}
+
+// 只在桌面会话里可用，生产路径见 pasteText。保留给手动跑的 e2e 脚本。
 export function copyTextToClipboard(text, { spawnImpl = spawn } = {}) {
   return new Promise((resolve, reject) => {
     const child = spawnImpl('pbcopy', [], { stdio: ['pipe', 'ignore', 'pipe'] });
@@ -141,12 +187,41 @@ export function shouldAnnouncePaired(wasPaired) {
   return !wasPaired;
 }
 
+// 重连退避：3 秒起，每次失败 ×2，名义封顶 60 秒，再叠加 ±20% 抖动；收到 paired 才重置。
+export const RELAY_BACKOFF_BASE_MS = 3000;
+export const RELAY_BACKOFF_MAX_MS = 60_000;
+export const RELAY_BACKOFF_JITTER = 0.2;
+// 持续断线期间，汇总日志的最小间隔。
+export const RELAY_SUMMARY_INTERVAL_MS = 10 * 60_000;
+
+export function formatRelayDuration(ms) {
+  const total = Math.max(0, Math.round(ms / 1000));
+  if (total < 60) return `${total} 秒`;
+  const minutes = Math.floor(total / 60);
+  if (minutes < 60) return `${minutes} 分 ${total % 60} 秒`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours} 小时 ${minutes % 60} 分`;
+}
+
 export class RelayInjector {
-  constructor({ url, macId, name = 'Claude 飞书指挥台', dir = import.meta.dirname, log = console, autoConnect = true }) {
+  constructor({
+    url, macId, name = 'Claude 飞书指挥台', dir = import.meta.dirname, log = console, autoConnect = true,
+    // 以下为可测性注入项，默认值即生产行为。
+    WebSocketImpl = WebSocket, now = Date.now, random = Math.random,
+    setTimeoutFn = setTimeout, clearTimeoutFn = clearTimeout,
+    setIntervalFn = setInterval, clearIntervalFn = clearInterval,
+  }) {
     this.url = url;
     this.macId = macId;
     this.name = name;
     this.log = log;
+    this.WebSocketImpl = WebSocketImpl;
+    this.now = () => now();
+    this.random = () => random();
+    this.setTimeoutFn = (...args) => setTimeoutFn(...args);
+    this.clearTimeoutFn = (...args) => clearTimeoutFn(...args);
+    this.setIntervalFn = (...args) => setIntervalFn(...args);
+    this.clearIntervalFn = (...args) => clearIntervalFn(...args);
     this.tokenFile = join(dir, `.device_token.${String(macId || 'unknown').replace(/[^A-Za-z0-9_.-]/g, '_')}`);
     this.deviceToken = this.#loadToken();
     this.ws = null;
@@ -156,6 +231,12 @@ export class RelayInjector {
     this.reconnectTimer = null;
     this.pingTimer = null;
     this.pending = new Map();
+    // 重连状态：disconnectedAt 非 null 表示「正处于断线期」，日志只在状态变化时写。
+    this.backoffMs = RELAY_BACKOFF_BASE_MS;
+    this.disconnectedAt = null;
+    this.reconnectAttempts = 0;
+    this.lastError = null;
+    this.lastSummaryAt = 0;
     if (autoConnect && url && macId) this.connect();
   }
 
@@ -163,44 +244,81 @@ export class RelayInjector {
   #saveToken(value) { try { writeFileSync(this.tokenFile, value, { mode: 0o600 }); } catch (error) { this.log.warn?.('device_token 保存失败', error.message); } }
   #dropToken() { try { unlinkSync(this.tokenFile); } catch {} }
 
+  /** 计算下一次重连延迟（带 ±20% 抖动），并把名义退避翻倍（封顶 60 秒）。 */
+  #nextReconnectDelay() {
+    const base = this.backoffMs;
+    this.backoffMs = Math.min(base * 2, RELAY_BACKOFF_MAX_MS);
+    const jitter = 1 + (this.random() * 2 - 1) * RELAY_BACKOFF_JITTER;
+    return Math.max(0, Math.round(base * jitter));
+  }
+
+  #onSocketClosed() {
+    this.paired = false;
+    this.clearIntervalFn(this.pingTimer);
+    for (const pending of this.pending.values()) {
+      clearTimeout(pending.timer); // 这些 ack 计时器由 #inject 用全局 setTimeout 创建，不走注入的时钟
+      pending.reject(new Error('RemoteVoice relay disconnected'));
+    }
+    this.pending.clear();
+    if (this.closed) return;
+    const delay = this.#nextReconnectDelay();
+    const seconds = Math.round(delay / 1000);
+    const at = this.now();
+    if (this.disconnectedAt === null) {
+      // 状态变化：已连接（或首次）→ 断开，写一条。
+      this.disconnectedAt = at;
+      this.reconnectAttempts = 0;
+      this.lastSummaryAt = at;
+      const why = this.lastError ? `（${this.lastError}）` : '';
+      this.log.warn?.(`RemoteVoice relay 已断开${why}，${seconds} 秒后重连`);
+    } else {
+      this.reconnectAttempts += 1;
+      if (at - this.lastSummaryAt >= RELAY_SUMMARY_INTERVAL_MS) {
+        this.lastSummaryAt = at;
+        this.log.warn?.(`RemoteVoice relay 已断开 ${formatRelayDuration(at - this.disconnectedAt)}，已连续重连 ${this.reconnectAttempts} 次，最近错误 ${this.lastError || '无'}，${seconds} 秒后重试`);
+      }
+    }
+    this.reconnectTimer = this.setTimeoutFn(() => this.connect(), delay);
+  }
+
+  #onPaired() {
+    const wasDown = this.disconnectedAt !== null;
+    const downFor = wasDown ? this.now() - this.disconnectedAt : 0;
+    const attempts = this.reconnectAttempts;
+    this.backoffMs = RELAY_BACKOFF_BASE_MS;
+    this.disconnectedAt = null;
+    this.reconnectAttempts = 0;
+    this.lastError = null;
+    this.lastSummaryAt = 0;
+    return { wasDown, downFor, attempts };
+  }
+
   connect() {
     if (this.closed || !this.url) return;
-    clearTimeout(this.reconnectTimer);
-    this.log.info?.('RemoteVoice relay 连接中');
-    const ws = new WebSocket(this.url);
+    this.clearTimeoutFn(this.reconnectTimer);
+    const ws = new this.WebSocketImpl(this.url);
     this.ws = ws;
     this.paired = false;
-    this.lastSeen = Date.now();
+    this.lastSeen = this.now();
     ws.on('open', () => {
       const hello = { type: 'hello', role: 'phone', macId: this.macId, name: this.name };
       if (this.deviceToken) hello.deviceToken = this.deviceToken;
       ws.send(JSON.stringify(hello));
     });
     ws.on('message', (buffer) => {
-      this.lastSeen = Date.now();
+      this.lastSeen = this.now();
       let message;
       try { message = JSON.parse(buffer.toString()); } catch { return; }
       this.handleMessage(message);
     });
-    ws.on('error', (error) => this.log.warn?.('RemoteVoice relay 连接异常', error.message));
-    ws.on('close', () => {
-      this.paired = false;
-      clearInterval(this.pingTimer);
-      for (const pending of this.pending.values()) {
-        clearTimeout(pending.timer);
-        pending.reject(new Error('RemoteVoice relay disconnected'));
-      }
-      this.pending.clear();
-      if (!this.closed) {
-        this.log.warn?.('RemoteVoice relay 已断开，3 秒后重连');
-        this.reconnectTimer = setTimeout(() => this.connect(), 3000);
-      }
-    });
-    clearInterval(this.pingTimer);
-    this.pingTimer = setInterval(() => {
-      if (ws.readyState !== WebSocket.OPEN) return;
-      if (Date.now() - this.lastSeen > 70_000) {
-        this.log.warn?.('RemoteVoice relay 心跳超时，主动重连');
+    // 连接异常只记下原因，由 close 事件统一按状态变化写日志。
+    ws.on('error', (error) => { this.lastError = error?.message || String(error); });
+    ws.on('close', () => this.#onSocketClosed());
+    this.clearIntervalFn(this.pingTimer);
+    this.pingTimer = this.setIntervalFn(() => {
+      if (ws.readyState !== (this.WebSocketImpl.OPEN ?? 1)) return;
+      if (this.now() - this.lastSeen > 70_000) {
+        this.lastError = '心跳超时';
         ws.terminate();
         return;
       }
@@ -217,7 +335,12 @@ export class RelayInjector {
           this.deviceToken = message.device_token;
           this.#saveToken(message.device_token);
         }
-        if (announce) this.log.info?.('RemoteVoice relay 已配对');
+        const recovery = this.#onPaired();
+        if (announce) {
+          this.log.info?.(recovery.wasDown
+            ? `RemoteVoice relay 已恢复配对（断开 ${formatRelayDuration(recovery.downFor)}，期间重连 ${recovery.attempts + 1} 次）`
+            : 'RemoteVoice relay 已配对');
+        }
     } else if (message.type === 'inject_result') {
       const pending = this.pending.get(message.id);
       if (pending) {
@@ -237,7 +360,7 @@ export class RelayInjector {
   async #inject(frame, { waitMs = 8000, ackMs = 9000 } = {}) {
     if (!this.url || !this.macId) throw new Error('未配置 RELAY_URL 或 MAC_ID');
     const deadline = Date.now() + waitMs;
-    while (!(this.ws?.readyState === WebSocket.OPEN && this.paired)) {
+    while (!(this.ws?.readyState === (this.WebSocketImpl.OPEN ?? 1) && this.paired)) {
       if (Date.now() > deadline) throw new Error('RemoteVoice relay 未就绪（未配对或连接断开）');
       await new Promise((resolve) => setTimeout(resolve, 150));
     }
@@ -261,10 +384,22 @@ export class RelayInjector {
     return this.#inject({ type: 'inject_key', key: String(key) }, { waitMs, ackMs });
   }
 
+  /** 让电脑端逐项贴进前台窗口。终端里每张约 1.6 秒，回执超时按张数放宽。 */
+  pasteItems(items, { waitMs = 8000 } = {}) {
+    const list = (items || []).map((item) => ({ path: String(item.path), kind: item.kind === 'image' ? 'image' : 'file' }));
+    return this.#inject({ type: 'inject_key', key: buildMacCommand('paste_items', { items: list }) }, {
+      waitMs, ackMs: 6000 + list.length * 2500,
+    });
+  }
+
+  pasteText(text, { waitMs = 8000, ackMs = 9000 } = {}) {
+    return this.#inject({ type: 'inject_key', key: buildMacCommand('paste_text', { text: String(text) }) }, { waitMs, ackMs });
+  }
+
   close() {
     this.closed = true;
-    clearTimeout(this.reconnectTimer);
-    clearInterval(this.pingTimer);
+    this.clearTimeoutFn(this.reconnectTimer);
+    this.clearIntervalFn(this.pingTimer);
     try { this.ws?.close(); } catch {}
   }
 }
@@ -272,5 +407,7 @@ export class RelayInjector {
 export class DisabledInjector {
   async injectText() { throw new Error('RemoteVoice 注入未配置'); }
   async injectKey() { throw new Error('RemoteVoice 注入未配置'); }
+  async pasteItems() { throw new Error('RemoteVoice 注入未配置'); }
+  async pasteText() { throw new Error('RemoteVoice 注入未配置'); }
   close() {}
 }

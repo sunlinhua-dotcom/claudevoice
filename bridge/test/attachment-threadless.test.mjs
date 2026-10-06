@@ -169,24 +169,39 @@ test('图片数据写剪贴板失败时退回文件引用，并重新读回验�
   assert.match(calls[1][1], /POSIX file/);
 });
 
-test('附件回执卡包含文件元数据、已验证状态、粘贴与转 Claude 按钮', () => {
-  assert.equal(typeof cardModule.buildAttachmentReceiptCard, 'function');
-  const value = cardModule.buildAttachmentReceiptCard({
-    delivery: {
-      id: 'attachment-1', status: 'clipboard', clipboardVerified: true,
-      attachments: [{ name: '方案.pdf', size: 2048, mime: 'application/pdf' }],
-    },
-  }, {});
-  const markdown = value.body.elements.find((item) => item.tag === 'markdown').content;
-  const actions = value.body.elements.flatMap((item) => item.behaviors || []).map((item) => item.value);
-  assert.match(markdown, /方案\.pdf/);
-  assert.match(markdown, /2 KB/);
-  assert.match(markdown, /application\/pdf/);
-  assert.match(markdown, /✅ 已进剪贴板/);
-  assert.deepEqual(actions, [
-    { ns: 'cc.attachment.paste', did: 'attachment-1' },
-    { ns: 'cc.attachment.claude', did: 'attachment-1' },
-  ]);
+test('附件批次卡：收集中给「现在就贴」，贴进后给发送 / 重新粘贴 / 转 Claude，失败写原因', () => {
+  const base = {
+    id: 'attachment-1', batchNumber: 3,
+    attachments: [{ name: '方案.pdf', size: 2048, mime: 'application/pdf' }, { name: 'a.jpg', size: 4096, mime: 'image/jpeg' }],
+  };
+  const render = (delivery) => {
+    const value = cardModule.buildAttachmentReceiptCard({ delivery: { ...base, ...delivery } }, {});
+    return {
+      title: value.header.title.content,
+      markdown: value.body.elements.find((item) => item.tag === 'markdown').content,
+      actions: value.body.elements.flatMap((item) => item.behaviors || []).map((item) => item.value.ns),
+    };
+  };
+  const collecting = render({ status: 'collecting', inflight: 1 });
+  assert.match(collecting.title, /批次 #3 收集中/);
+  assert.match(collecting.markdown, /已收到 2 个，还有 1 个在下载/);
+  assert.deepEqual(collecting.actions, ['cc.attachment.flush']);
+
+  const pasted = render({ status: 'pasted', pastedCount: 2, pasteApp: 'Claude' });
+  assert.match(pasted.title, /已贴进 Claude/);
+  assert.match(pasted.markdown, /方案\.pdf/);
+  assert.match(pasted.markdown, /2 KB/);
+  assert.match(pasted.markdown, /回一句指令/);
+  assert.deepEqual(pasted.actions, ['cc.attachment.enter', 'cc.attachment.paste', 'cc.attachment.claude']);
+
+  const failed = render({ status: 'failed', error: '电脑端 ClaudeVoice 不在线' });
+  assert.match(failed.markdown, /原因：.*不在线/);
+  assert.deepEqual(failed.actions, ['cc.attachment.paste', 'cc.attachment.claude']);
+
+  const sent = render({ status: 'sent', submitText: '对比这两张图' });
+  assert.match(sent.title, /已发送/);
+  assert.match(sent.markdown, /对比这两张图/);
+  assert.deepEqual(sent.actions, []);
 });
 
 test('所有文本、卡片、任务、完成、失败与产物只用 im.message.create 主流直发', async () => {
@@ -256,26 +271,23 @@ test('SessionStore 最近任务规则为 running 优先，否则最近完成且�
   assert.equal(store.findRecentTask().id, 'running');
 });
 
-test('控制器下载 input 附件、验证剪贴板、PATCH 大文件卡并支持粘贴/转 Claude', async () => {
-  const calls = { cards: [], patches: [], clipboard: [], keys: [], tasks: [] };
-  const delivery = {
-    id: 'did-1', sourceMessageId: 'source-1', project: 'demo', status: 'copying',
-    prompt: '请先读取该文件：\n/project/demo/.cc-bridge/incoming/source-1/a.pdf',
-    attachments: [{ path: '/project/demo/.cc-bridge/incoming/source-1/a.pdf', name: 'a.pdf', size: 12 * 1024 * 1024, mime: 'application/pdf', resourceType: 'file' }],
-  };
+test('控制器下载大文件时卡片显示下载进度，封批后按文件引用贴，并支持重新粘贴/转 Claude', async () => {
+  const calls = { cards: [], patches: [], pastes: [], tasks: [] };
+  const deliveries = {};
   const store = {
-    state: { currentProject: 'demo', settings: { inputMode: 'input' } },
+    state: { currentProject: 'demo', settings: { inputMode: 'input' }, inputDeliveries: deliveries },
     projects: { demo: { path: '/project/demo' } },
     findTaskByMessage: () => null,
     currentProject: () => ({ name: 'demo', path: '/project/demo' }),
     resolveProject: () => ({ name: 'demo', path: '/project/demo' }),
-    createInputDelivery: async (value) => Object.assign(delivery, value),
-    updateInputDelivery: async (_id, patch) => Object.assign(delivery, patch),
-    getInputDelivery: () => delivery,
+    createInputDelivery: async (value) => (deliveries['did-1'] = { id: 'did-1', cardMessageId: '', ...value }),
+    updateInputDelivery: async (id, patch) => Object.assign(deliveries[id], patch),
+    getInputDelivery: (id) => deliveries[id] || null,
   };
+  const file = { path: '/project/demo/.cc-bridge/incoming/source-1/a.pdf', name: 'a.pdf', size: 12 * 1024 * 1024, mime: 'application/pdf', resourceType: 'file' };
   const media = { prepareMediaMessage: async (_message, options) => {
-    await options.onLargeDownload({ name: 'a.pdf', size: 12 * 1024 * 1024, mime: 'application/pdf' });
-    return { prompt: delivery.prompt, attachments: delivery.attachments };
+    await options.onLargeDownload({ name: 'a.pdf', size: file.size, mime: 'application/pdf' });
+    return { prompt: `请先读取该文件：\n${file.path}`, attachments: [file] };
   } };
   const cards = {
     sendAttachmentReceipt: async (value) => { calls.cards.push(structuredClone(value)); return 'attachment-card'; },
@@ -283,25 +295,27 @@ test('控制器下载 input 附件、验证剪贴板、PATCH 大文件卡并支�
     replyText: async () => 'ack',
   };
   const controller = new BridgeController({
-    store, runner: {}, cards, approval: {}, media,
-    attachmentClipboard: async (items) => {
-      calls.clipboard.push(items.map((item) => item.path));
-      return { verified: true, method: 'file-reference', clipboardInfo: '«class furl», 1' };
-    },
-    injector: { injectKey: async (key) => { calls.keys.push(key); return { ok: true }; } },
+    store, runner: {}, cards, approval: {}, media, batchIdleMs: 60_000,
+    injector: { pasteItems: async (items) => {
+      calls.pastes.push(items);
+      return { ok: true, mode: `cv:${JSON.stringify({ pasted: items.length, total: items.length, app: 'Terminal', reason: '' })}` };
+    } },
     log: {},
   });
   await controller.handleAttachment(event({ id: 'source-1', type: 'file', content: { file_key: 'f', file_name: 'a.pdf' } }).message);
-  assert.equal(calls.cards[0].status, 'downloading');
-  assert.equal(calls.patches[0].id, 'attachment-card');
-  assert.equal(calls.patches[0].value.status, 'clipboard');
-  assert.equal(calls.patches[0].value.clipboardVerified, true);
+  assert.equal(calls.cards[0].status, 'collecting');
+  assert.ok(calls.patches.some((item) => item.value.largeDownload?.name === 'a.pdf'));
+  await controller.handleCardAction({ ns: 'cc.attachment.flush', did: 'did-1' });
+  assert.deepEqual(calls.pastes[0], [{ path: file.path, kind: 'file' }]);
+  assert.equal(calls.patches.at(-1).id, 'attachment-card');
+  assert.equal(calls.patches.at(-1).value.status, 'pasted');
+  assert.equal(calls.patches.at(-1).value.pasteApp, 'Terminal');
 
   controller.handleText = async (text, context) => { calls.tasks.push({ text, context }); return { id: 'task', number: 9 }; };
   await controller.handleCardAction({ ns: 'cc.attachment.paste', did: 'did-1' });
   await controller.handleCardAction({ ns: 'cc.attachment.claude', did: 'did-1' });
-  assert.deepEqual(calls.keys, ['paste']);
-  assert.equal(calls.clipboard.length, 2);
+  assert.equal(calls.pastes.length, 2);
+  assert.match(calls.tasks[0].text, /a\.pdf/);
   assert.equal(calls.tasks[0].context.projectName, 'demo');
 });
 

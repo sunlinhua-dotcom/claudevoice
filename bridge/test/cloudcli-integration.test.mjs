@@ -58,6 +58,10 @@ async function runHook(payload, env = {}) {
   child.stderr.on('data', (chunk) => { stderr += chunk; });
   child.stdin.end(JSON.stringify(payload));
   const [code] = await once(child, 'exit');
+  // hook 主进程只做本地判断就退出，POST 由脱离的子进程稍后发出：
+  // 等假 Worker 收到请求再关；本就不该发请求的用例最多静置 2 秒。
+  const deadline = Date.now() + 2_000;
+  while (!received.length && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 40));
   server.close();
   await once(server, 'close');
   assert.equal(code, 0, stderr);

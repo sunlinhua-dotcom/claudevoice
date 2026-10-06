@@ -240,8 +240,10 @@ test('controller 模拟粘贴、回车、转 Claude、切模式并停止语音�
     runner: {},
     cards: { replyText: async (id, text) => calls.replies.push({ id, text }) },
     approval: {},
-    injector: { injectKey: async (key) => { calls.keys.push(key); return { ok: true, mode: 'type' }; } },
-    clipboard: async (text) => calls.copied.push(text),
+    injector: {
+      injectKey: async (key) => { calls.keys.push(key); return { ok: true, mode: 'type' }; },
+      pasteText: async (text) => { calls.copied.push(text); return { ok: true }; },
+    },
     log: {},
   });
   controller.handleText = async (text, context) => calls.tasks.push({ text, context });
@@ -254,7 +256,7 @@ test('controller 模拟粘贴、回车、转 Claude、切模式并停止语音�
   await controller.handleCardAction({ ns: 'cc.inject.convert', tid: 't1' });
 
   assert.deepEqual(calls.copied, ['回调文本']);
-  assert.deepEqual(calls.keys, ['paste', 'enter']);
+  assert.deepEqual(calls.keys, ['enter']);
   assert.deepEqual(calls.tasks.map((item) => item.text), ['回调文本']);
   assert.deepEqual(calls.modes, ['input']);
   assert.deepEqual(calls.stops, ['t1']);

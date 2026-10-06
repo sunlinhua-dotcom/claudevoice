@@ -1,6 +1,6 @@
 # cc-bridge · Claude 飞书指挥台
 
-`cc-bridge` 是 Mac 常驻进程：独占指定飞书应用的长连接，默认保持与 Remote Voice 原有习惯一致的“输入模式”——说话或发文字即进入电脑，图片/文件/视频等附件进入 Mac 剪贴板。需要给 Claude 下任务时发 `任务 <文字>`，或用 `/task` 持久切换为任务模式；文字输入先由本机 `pbcopy` 写剪贴板，附件按图片数据或文件引用写剪贴板，再经 RemoteVoice relay 注入 Mac 前台窗口。所有回执、任务、审批、完成和失败消息都在私聊主聊天流直发，不创建飞书话题。
+`cc-bridge` 是 Mac 常驻进程：独占指定飞书应用的长连接，默认保持与 Remote Voice 原有习惯一致的“输入模式”——说话或发文字即进入电脑，图片/文件/视频等附件几秒内攒成一批贴进 Mac 前台窗口。需要给 Claude 下任务时发 `任务 <文字>`，或用 `/task` 持久切换为任务模式；文字与附件都经 RemoteVoice relay 交给电脑端 ClaudeVoice.app 写剪贴板并粘贴——cc-bridge 由 PM2 开机拉起，不在桌面会话里，本机没有剪贴板（`pbcopy` / NSPasteboard / AppleScript 全部失败）。所有回执、任务、审批、完成和失败消息都在私聊主聊天流直发，不创建飞书话题。
 
 ## 架构
 
@@ -17,11 +17,10 @@ index.mjs + router.mjs ──► sessions.mjs（projects/state/队列）
   │                              ▼                    ▼
   ├── cards.mjs ◄──────── approval-server.mjs ◄── approve-mcp.mjs（permission_prompt / ask_user）
   ├── stt.mjs ──资源下载 / ffmpeg / 飞书 STT──► 文字路由
-  ├── media.mjs ──全类型附件下载 / 产物白名单──► Mac 剪贴板或 Claude
+  ├── media.mjs ──全类型附件下载 / 产物白名单──► 批次贴图或 Claude
   ├── worker-events.mjs ──noNotify 生命周期事件──► ClaudeVoice Worker / 仅面板 SSE
   │
   └── input 模式 /「注入 」/「/type 」
-        ├── spawn pbcopy + stdin ──► Mac 剪贴板（不依赖 App / Worker）
         └── inject.mjs ──phone WS──► RemoteVoice Worker ──► Mac 前台窗口
               ▲ inject_result（App inject_ack 的 Worker 透传）
 ```
@@ -112,10 +111,10 @@ pm2 logs cc-bridge --lines 200
 | `/sessions` / `会话列表` | 当前项目最近会话 |
 | `/resume [n]` / `续会话 [n]` | 选择会话，下一条普通文字以 `--resume` 续接 |
 | `/help` / `帮助` | 帮助 |
-| `注入 <文字>` / `/type <文字>` | 任意模式强制走剪贴板 + RemoteVoice 输入 |
+| `注入 <文字>` / `/type <文字>` | 任意模式强制走 RemoteVoice 输入 |
 | `任务 <文字>` | 任意模式强制交给 Claude |
 
-任务模式下，普通文字、语音识别文本和附件进入 Claude 媒体管线。语音确认使用小卡展示识别文本，并提供“改为输入到电脑”和模式切换；改道时会停止刚创建且仍活动的 Claude 任务。输入模式下，语音仍先 STT，再按文字输入；文字先写本机剪贴板并自动注入。image/file/media/video/post 内嵌附件下载到当前项目 `.cc-bridge/incoming/<msgId>/`：png/jpg/gif/webp 优先按图片数据写剪贴板，失败回退文件引用，其余全部按文件引用写入。每次写入后必须以 `osascript -e 'clipboard info'` 读回验证，验证成功才显示“✅ 已进剪贴板”。附件卡提供“📋 粘贴到前台窗口 / 🤖 转给 Claude”。超过 10MB 的资源会先显示“⏬ 下载中…”并在完成后 PATCH。
+任务模式下，普通文字、语音识别文本和附件进入 Claude 媒体管线。语音确认使用小卡展示识别文本，并提供“改为输入到电脑”和模式切换；改道时会停止刚创建且仍活动的 Claude 任务。输入模式下，语音仍先 STT，再按文字输入；文字经 relay 由 App 粘贴进焦点窗口。image/file/media/video/post 内嵌附件下载到当前项目 `.cc-bridge/incoming/<msgId>/`，连续发来的附件停 4 秒没有新的就封成一批（一张卡、“▶️ 现在就贴”可提前封），由 App 逐个贴进前台窗口：图片按 PNG+TIFF 图片数据贴（终端里的 Claude Code 用 Ctrl+V，其余 Cmd+V），其他按文件引用贴。贴进后 10 分钟内的下一句文字 / 语音就是这批的指令：接在附件后面打进去，确认打进去才回车；卡片也可直接点“⏎ 发送”。卡片另有“📋 重新粘贴 / 🤖 转给 Claude”。超过 10MB 的资源下载期间卡片显示进度。
 
 `/` 开头的命令始终按命令处理；只有专用 `/type` 例外，它是强制输入前缀。任务追问不再依赖 thread/root_id：引用回复某任务的任务卡、审批卡、ask_user 卡、完成卡或失败卡，会通过 `parent_id` 与 message_id 映射精准命中该任务；无引用的普通 task 模式消息优先续接最近运行任务，否则续接最近完成且有 `session_id` 的任务；仍无任务时才新建。多任务并行时，任务卡标题均带 `#编号`，用 `/status` 查看全部，并引用对应卡片精准追问。
 
@@ -146,17 +145,17 @@ npm run assets:upload    # banner SHA-256 缓存上传
 
 ## 用户验证三步
 
-1. 默认无需切换，直接发一条文字和一条语音；两条都应出现主聊天流输入回执卡，电脑剪贴板可直接粘贴，relay 有焦点时卡片最终 PATCH 为“已注入”。点“粘贴到光标处”和“回车”确认按键动作。
+1. 默认无需切换，直接发一条文字和一条语音；两条都应出现主聊天流输入回执卡，relay 有焦点时卡片最终 PATCH 为“已注入”。点“粘贴到光标处”和“回车”确认按键动作。
 2. 在回执卡点“转给 Claude”，应出现新任务卡；点模式按钮或发 `/task`，应收到简短确认。任务模式再发语音，应出现带“改为输入到电脑”的语音确认卡；点击后活动任务停止并生成输入回执。
 3. 验证强制前缀：任务模式发 `注入 测试` 仍输入电脑；输入模式发 `任务 列出项目根目录，只读` 仍创建 Claude 任务；`/status` 等命令在两种模式都正常。
-4. input 模式分别发一张图片和一个 PDF：都应落在项目 `.cc-bridge/incoming/`；图片按图片数据、PDF 按文件引用进入 Mac 剪贴板，卡片显示文件名/大小/MIME 与“✅ 已进剪贴板”。切到 task 模式重发附件，应继续进入 Claude 媒体任务。
+4. input 模式连发三张图：只出一张批次卡，几秒后三张依次贴进前台输入框；再回一句文字，应接在图后并回车，卡片变“📤 已发送”。PDF 应按文件引用贴入。切到 task 模式重发附件，应继续进入 Claude 媒体任务。
 5. 多任务并行时，引用回复目标任务的任意卡片做精准追问；不引用时应自动续接最近运行任务，若无运行任务则续接最近完成且可 resume 的会话。任务卡、完成/失败卡和命令响应均应平铺在私聊主聊天流，不出现“回复话题”入口。
 
 ## 安全与限制
 
 - 只有 `LARK_OPEN_ID` 对应的 BRIGHT 可驱动任务；其他人只收到“此机器人仅服务主人”。
 - 日志只输出 App/open_id 打码值，不输出 Secret、审批 token 或 RemoteVoice device token。
-- 文字剪贴板固定使用 `spawn('pbcopy', [])` + stdin；附件固定使用 `spawn('osascript', ['-e', script, '--', ...paths])`，路径只在 argv 中，绝不拼进 AppleScript 或 shell 命令字符串。
+- cc-bridge 进程内不碰剪贴板；贴图 / 贴文字指令是 `inject_key` 的 `cv:` + JSON（中继原样转发，见 `inject.mjs` 的 `buildMacCommand`），App 结果塞回 `inject_ack.mode`。路径只作为 JSON 字段，不拼进任何命令字符串。
 - 图片/文件位于项目内 `.cc-bridge/incoming/`，会保留至启动清理窗口（24 小时），且仓库 `.gitignore` 已忽略 `.cc-bridge/`。
 - 产物路径必须在项目目录或 `/tmp`；symlink 指向目录外会被拒绝。
 - `yolo` 会绕过审批，仅适用于主人明确接受风险的任务。

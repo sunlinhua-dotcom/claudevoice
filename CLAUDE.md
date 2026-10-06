@@ -18,7 +18,7 @@ Worker 决定念什么、用谁的声音，再同时推给网页面板、Web Pus
 | `shared/speech.cjs` | 播报话术层：音色分配 / 名字读法 / 句子模板 / 摘要清洗 | **活**，三个宿主共用 |
 | `bridge/` | cc-bridge，飞书私聊远程驱动 Claude Code | **活**，PM2 常驻 |
 | `wxbridge/` | 微信客户 brief 自动归档到 `<项目>/_inbox/` | **活**，PM2 常驻 |
-| `mac-app/` | 菜单栏 App：本机播报、听写、文本注入 | **活**，装在 `/Applications` |
+| `mac-app/` | 菜单栏 App：本机播报、听写、文本注入；`BoxSync.swift` 让 Mac 跟小智盒子同步念（9/29，配置 `~/.config/claudevoice/xiaozhi.json`，没有就不启用；完成 / 等你 / 授权 / 失败这四类在线时不再本机合成） | **活**，装在 `/Applications` |
 | `server.js` | 自托管版 Worker（不依赖 Cloudflare 的那条路） | **睡着**，见下面红线 |
 | `names.json` | 项目名读音表，三处都读它 | 活，改完要么 deploy 要么 `tools/cvname` 热改 |
 | `tools/sfx/cv-sfx` | 本地生成每个项目专属提示音（Stable Audio Open Small，不联网） | 按需 |
@@ -43,8 +43,8 @@ Workers AI 出摘要）→ Hub 广播 SSE + Web Push；网页面板再回头调 
 ## 3. 命令（够用就这些）
 
 ```bash
-npm test                              # shared/speech.cjs 的 20 条回归
-cd bridge && npm test                 # cc-bridge 100 条
+npm test                              # 69 条：话术层 + hook 脱离 + Worker 缓存 / 限流 / SSE
+cd bridge && npm test                 # cc-bridge 123 条
 cd cloudflare && npx wrangler deploy --dry-run   # 验 worker.js 能打包（node --check 对它无效，见 §4）
 pm2 status                            # cc-bridge / wxbridge 是否还活着
 node tools/cvname <项目> <读音>        # 热改读音表，免部署
@@ -67,13 +67,16 @@ node tools/cvname <项目> <读音>        # 热改读音表，免部署
   兜底（只放行 `EDGE_VOICE_MAP` 里的名字或 `zh-CN-XxxNeural` 形状，其余退回 XiaoxiaoNeural）。
   以前 worker 那份偷偷丢弃未知 override，导致同一份 `projects.json` 本地和云端念出两种声音。
 - **播报绝不念英文**：拿不到中文摘要就退回定型句（`doneFallback`），这是有意的，不是缺陷。
+- **cc-bridge 没有剪贴板**：它由 PM2 开机拉起，不在桌面会话里，`pbcopy` / NSPasteboard / AppleScript 在它进程里全部失败
+  （2026-10-06 附件「处理失败」就是这个）。任何剪贴板、粘贴都交给 ClaudeVoice.app：`inject_key` 发 `cv:` + JSON，
+  见 `bridge/inject.mjs` 的 `buildMacCommand` 与 `mac-app/ItemPaster.swift`。改 mac-app 后要 `mac-app/build.sh` 重装并重启 App。
 
 ## 5. 省 token 的做法（这仓库容易踩）
 
 1. **先看这一页，别 `cat` 大文件**。`docs/archive/` 整个目录 ~118KB，`LOG.md` 一个就 49KB。
 2. **`server.js` / `worker.js` 都是六七百行，别整读**。找东西用 `grep -n`，改动用 `sed -n` 取片段。
 3. **话术只改 `shared/speech.cjs` 一处**，别再往三个宿主里各写一份——那正是这轮合并掉的东西。
-4. **验证走测试，别靠人肉听**：`npm test` 加 `bridge` 那 100 条不到 6 秒，比发一次真事件便宜得多。
+4. **验证走测试，别靠人肉听**：`npm test` 加 `bridge` 那 123 条合计约 15 秒，比发一次真事件便宜得多。
 5. **实机验收（真发飞书 / 真播报）留到最后一次做完**，别每改一行就来一轮。
 6. 上下文过 120k 就 `/compact`，这是全局规则，本仓库尤其容易在读日志时冲上去。
 

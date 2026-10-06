@@ -211,11 +211,11 @@ function inputModeButton(inputMode, reference = {}) {
 export function buildInputReceiptCard({ delivery, inputMode = 'input' }, imageKeys = loadBannerKeys()) {
   const status = {
     copying: { title: '📋 正在复制到剪贴板', template: 'blue', line: '正在写入电脑剪贴板…' },
-    injecting: { title: '⌨️ 已复制，正在注入', template: 'blue', line: '剪贴板已就绪，正在等待电脑端真实回执…' },
+    injecting: { title: '⌨️ 正在注入', template: 'blue', line: '已发往电脑，正在等待电脑端真实回执…' },
     typed: { title: '✅ 已注入电脑输入框', template: 'green', line: '已注入：App 已确认文字打进当前焦点窗口；剪贴板也已同步。' },
-    clipboard: { title: '📋 已复制到剪贴板', template: 'blue', line: '自动注入未完成，文字仍已安全保存在电脑剪贴板。' },
-    unconfirmed: { title: '📋 已复制，注入待确认', template: 'orange', line: '注入帧已发出但未收到 App 回执；剪贴板已就绪。' },
-    failed: { title: '⚠️ 剪贴板写入失败', template: 'red', line: '本机 pbcopy 未成功，未继续自动注入。' },
+    clipboard: { title: '📋 已复制到剪贴板', template: 'blue', line: '电脑端没识别到输入焦点，文字已放进电脑剪贴板，聚焦后点「粘贴到光标处」。' },
+    unconfirmed: { title: '📋 已发出，注入待确认', template: 'orange', line: '注入帧已发出但未收到 App 回执，结果不确定。' },
+    failed: { title: '⚠️ 没送到电脑', template: 'red', line: '文字没有进电脑输入框，原因见下。' },
   }[delivery?.status] || { title: '📋 输入回执', template: 'blue', line: '正在处理。' };
   const stopped = delivery?.stoppedTaskNumber ? `\n\n已停止 Claude 任务 #${delivery.stoppedTaskNumber} 并改为电脑输入。` : '';
   const reason = delivery?.relayReason ? `\n\n**注入说明：** ${clip(delivery.relayReason, 300)}` : '';
@@ -229,7 +229,7 @@ export function buildInputReceiptCard({ delivery, inputMode = 'input' }, imageKe
       button('🤖 转给 Claude', { ns: 'cc.inject.claude', did: delivery.id }),
       inputModeButton(inputMode, { did: delivery.id }),
     ],
-    note: `当前：${inputMode === 'input' ? '输入模式' : '任务模式'} · 剪贴板由 bridge 本机 pbcopy 写入`,
+    note: `当前：${inputMode === 'input' ? '输入模式' : '任务模式'} · 剪贴板与粘贴由电脑端 ClaudeVoice 完成`,
     bannerKind: 'voice', imageKeys,
   });
 }
@@ -256,27 +256,51 @@ function formatBytes(size) {
 }
 
 export function buildAttachmentReceiptCard({ delivery }, imageKeys = loadBannerKeys()) {
+  const label = delivery?.batchNumber ? `批次 #${delivery.batchNumber}` : '附件';
+  const items = delivery?.attachments || [];
+  const count = items.length;
+  const pasted = Number(delivery?.pastedCount) || 0;
+  const app = delivery?.pasteApp || '前台窗口';
+  const waiting = delivery?.inflight ? `，还有 ${delivery.inflight} 个在下载` : '';
   const status = {
-    downloading: { title: '⏬ 附件下载中…', template: 'blue', text: '⏬ 下载中…' },
-    clipboard: { title: '✅ 附件已进剪贴板', template: 'green', text: '✅ 已进剪贴板' },
-    failed: { title: '⚠️ 附件处理失败', template: 'red', text: '❌ 未进入剪贴板' },
-  }[delivery?.status] || { title: '📎 附件处理中', template: 'blue', text: '正在处理…' };
-  const files = (delivery?.attachments || []).map((item, index) => [
+    collecting: { title: `📥 ${label} 收集中`, template: 'blue', line: `已收到 ${count} 个${waiting}；停几秒没有新的就一起贴进电脑。` },
+    pasting: { title: `🖼 ${label} 正在贴进电脑`, template: 'blue', line: `正在把 ${count} 个附件逐个贴进前台窗口…` },
+    pasted: { title: `✅ ${label} 已贴进 ${app}`, template: 'green', line: `${count} 个附件已在输入框里。点「⏎ 发送」直接发出；或者在飞书回一句指令，会接在附件后面并自动回车。` },
+    partial: { title: `⚠️ ${label} 只贴进 ${pasted}/${count}`, template: 'orange', line: '贴进去的留在输入框里；可以「重新粘贴」，或照样发送。' },
+    unconfirmed: { title: `📋 ${label} 已发往电脑，没收到回执`, template: 'orange', line: '不确定贴没贴进去，看一眼电脑；需要时点「重新粘贴」。' },
+    failed: { title: `⚠️ ${label} 没贴进去`, template: 'red', line: count ? '附件已下载在电脑上，可以「重新粘贴」或转给 Claude。' : '这一批没有可用的附件。' },
+    sent: { title: `📤 ${label} 已发送`, template: 'green', line: delivery?.submitText ? `已接上指令并回车：${clip(delivery.submitText, 300)}` : '已在电脑上回车发送。' },
+  }[delivery?.status] || { title: `📎 ${label} 处理中`, template: 'blue', line: '正在处理…' };
+  const files = items.map((item, index) => [
     `${index + 1}. **${clip(item.name || '未命名附件', 180)}**`,
     `   ${formatBytes(item.size)} · ${clip(item.mime || 'application/octet-stream', 120)}`,
-  ].join('\n')).join('\n') || '（等待资源信息）';
-  const reason = delivery?.error || delivery?.relayReason;
-  const fallback = delivery?.clipboardFallback ? '\n\n图片数据写入失败，已安全退回“文件引用”剪贴板。' : '';
-  const actions = delivery?.status === 'clipboard' && delivery?.clipboardVerified ? [
-    button('📋 粘贴到前台窗口', { ns: 'cc.attachment.paste', did: delivery.id }, 'primary'),
-    button('🤖 转给 Claude', { ns: 'cc.attachment.claude', did: delivery.id }),
-  ] : [];
+  ].join('\n')).join('\n') || '（等待下载）';
+  const notes = [];
+  if (delivery?.largeDownload) notes.push(`正在下载：${clip(delivery.largeDownload.name || '大文件', 120)}（${formatBytes(delivery.largeDownload.size)}）`);
+  if (delivery?.error) notes.push(`**原因：** ${clip(delivery.error, 400)}`);
+  if (delivery?.submitError) notes.push(`**发送没成功：** ${clip(delivery.submitError, 300)}`);
+  for (const error of delivery?.errors || []) notes.push(`**下载失败：** ${clip(error, 300)}`);
+  const did = delivery?.id;
+  const actions = {
+    collecting: [button('▶️ 现在就贴', { ns: 'cc.attachment.flush', did }, 'primary')],
+    pasted: [
+      button('⏎ 发送', { ns: 'cc.attachment.enter', did }, 'primary'),
+      button('📋 重新粘贴', { ns: 'cc.attachment.paste', did }),
+      button('🤖 转给 Claude', { ns: 'cc.attachment.claude', did }),
+    ],
+    failed: count ? [
+      button('📋 重新粘贴', { ns: 'cc.attachment.paste', did }, 'primary'),
+      button('🤖 转给 Claude', { ns: 'cc.attachment.claude', did }),
+    ] : [],
+  };
+  actions.partial = actions.pasted;
+  actions.unconfirmed = actions.pasted;
   return card({
     title: status.title,
     template: status.template,
-    markdown: `${delivery?.project ? `**项目：** ${delivery.project}\n` : ''}**附件**\n${files}\n\n**状态：** ${status.text}${reason ? `\n**原因：** ${clip(reason, 600)}` : ''}${fallback}`,
-    actions,
-    note: delivery?.clipboardInfo ? `clipboard info：${clip(delivery.clipboardInfo, 300)}` : '附件保存在 bridge 受控媒体目录',
+    markdown: `${delivery?.project ? `**项目：** ${delivery.project}\n` : ''}**附件**\n${files}\n\n**状态：** ${status.line}${notes.length ? `\n\n${notes.join('\n')}` : ''}`,
+    actions: actions[delivery?.status] || [],
+    note: '剪贴板与粘贴由电脑端 ClaudeVoice 完成；终端里的 Claude Code 用 Ctrl+V 贴图',
     bannerKind: delivery?.status === 'failed' ? 'failed' : 'voice', imageKeys,
   });
 }

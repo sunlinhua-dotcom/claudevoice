@@ -5,7 +5,7 @@ import { pathToFileURL } from 'node:url';
 import { join } from 'node:path';
 import { ApprovalServer } from './approval-server.mjs';
 import { CardService } from './cards.mjs';
-import { copyTextToClipboard, RelayInjector, DisabledInjector, writeAttachmentsToClipboard } from './inject.mjs';
+import { describeRelayFailure, DisabledInjector, readMacPasteResult, RelayInjector } from './inject.mjs';
 import { createObservedDispatcher, createSdkLogger, LarkConnectionManager } from './lark-connection.mjs';
 import { extractOutputFiles, MediaStore, parseAttachmentMessage } from './media.mjs';
 import { createCardActionHandler, createMessageHandler, formatPingStatus } from './router.mjs';
@@ -20,10 +20,17 @@ import {
 
 const BRIGHT_OPEN_ID = ''; // owner 的飞书 open_id 从 .env 的 LARK_OPEN_ID 注入
 
+const IMAGE_FILE = /\.(png|jpe?g|gif|webp|heic|heif|tiff?|bmp)$/i;
+
+/** 图片按图片数据贴（进对话就是一张图），其余按文件引用贴。 */
+export function attachmentKind(item) {
+  return String(item?.mime || '').startsWith('image/') || IMAGE_FILE.test(String(item?.path || item?.name || '')) ? 'image' : 'file';
+}
+
 export class BridgeController {
   constructor({
-    store, runner, cards, approval, injector = new DisabledInjector(), clipboard = copyTextToClipboard,
-    media = null, attachmentClipboard = writeAttachmentsToClipboard, events = null,
+    store, runner, cards, approval, injector = new DisabledInjector(),
+    media = null, events = null, batchIdleMs = 4000, submitWindowMs = 10 * 60_000,
     connectionHealth = null, log = console, discoverSessions = discoverDiskSessions,
     cloudCliProbe = probeCloudCli, now = Date.now, webUrl = normalizeWebUrl(),
   }) {
@@ -32,9 +39,14 @@ export class BridgeController {
     this.cards = cards;
     this.approval = approval;
     this.injector = injector;
-    this.clipboard = clipboard;
     this.media = media;
-    this.attachmentClipboard = attachmentClipboard;
+    // 飞书多选图片发出来是一张一条消息：停 batchIdleMs 没有新的就封成一批，一起贴进电脑。
+    this.batchIdleMs = batchIdleMs;
+    // 贴进去还没发出的批次，在这段时间内收到的下一句话就当它的指令。
+    this.submitWindowMs = submitWindowMs;
+    this.collectingBatch = null;
+    this.localBatchSeq = 0;
+    this.cardChains = new Map();
     this.events = events;
     this.connectionHealth = connectionHealth;
     this.log = log;
@@ -49,6 +61,9 @@ export class BridgeController {
   }
 
   async handleInput(text, { message, origin = 'text', postprocess = false, stoppedTask = null } = {}) {
+    // 刚贴进电脑、还没发出去的附件批次：这句话就是给它们的指令，接在附件后面打进去再回车。
+    const pendingBatch = stoppedTask ? null : this.findPendingBatch();
+    if (pendingBatch) return this.submitBatch(pendingBatch, text, { postprocess });
     const delivery = await this.store.createInputDelivery({
       text,
       messageId: message?.message_id || '',
@@ -56,18 +71,9 @@ export class BridgeController {
       postprocess,
       stoppedTaskNumber: stoppedTask?.number || 0,
     });
+    // 剪贴板由电脑端 ClaudeVoice 写：cc-bridge 是 PM2 在后台拉起的，没有桌面会话，本机 pbcopy 必败。
+    await this.store.updateInputDelivery(delivery.id, { status: 'injecting' });
     let cardMessageId = '';
-    try {
-      await this.clipboard(delivery.text);
-      await this.store.updateInputDelivery(delivery.id, { status: 'injecting' });
-    } catch (error) {
-      await this.store.updateInputDelivery(delivery.id, { status: 'failed', relayReason: error.message });
-      try {
-        cardMessageId = await this.cards.sendInputReceipt(delivery, this.store.state.settings.inputMode);
-        await this.store.updateInputDelivery(delivery.id, { cardMessageId });
-      } catch (cardError) { this.log.error?.('输入失败回执卡发送失败', cardError.message); }
-      return delivery;
-    }
     try {
       cardMessageId = await this.cards.sendInputReceipt(delivery, this.store.state.settings.inputMode);
       await this.store.updateInputDelivery(delivery.id, { cardMessageId });
@@ -81,9 +87,9 @@ export class BridgeController {
       else if (result?.ok && result?.mode === 'clipboard') patch = { status: 'clipboard', relayMode: 'clipboard', relayReason: 'App 未检测到合适的输入焦点' };
       else if (result?.ok && result?.unconfirmed) patch = { status: 'unconfirmed', relayMode: '', relayReason: 'App 回执超时' };
       else if (result?.ok) patch = { status: 'typed', relayMode: result?.mode || 'delivered', relayReason: '' };
-      else patch = { status: 'clipboard', relayMode: result?.mode || '', relayReason: result?.reason || '电脑端未确认注入' };
+      else patch = { status: 'failed', relayMode: result?.mode || '', relayReason: describeRelayFailure(result) };
     } catch (error) {
-      patch = { status: 'clipboard', relayMode: '', relayReason: error.message };
+      patch = { status: 'failed', relayMode: '', relayReason: error.message };
     }
     await this.store.updateInputDelivery(delivery.id, patch);
     if (cardMessageId) {
@@ -101,67 +107,199 @@ export class BridgeController {
       : this.store.currentProject?.();
     const projectName = project?.name || referencedTask?.project || this.store.state?.currentProject || '';
     const projectPath = project?.path || this.store.projects?.[projectName]?.path;
-    let cardMessageId = '';
-    let delivery = null;
-    let progressMeta = null;
+    const batch = this.openBatch(projectName);
+    batch.inflight += 1;
+    clearTimeout(batch.timer);
+    batch.sourceMessageIds.push(message.message_id);
+    this.refreshBatch(batch);
     const parsed = parseAttachmentMessage(message);
     try {
       const prepared = await this.media.prepareMediaMessage(message, {
         projectPath,
         onLargeDownload: async (meta) => {
-          progressMeta = meta;
-          if (cardMessageId) return;
-          try {
-            cardMessageId = await this.cards.sendAttachmentReceipt({
-              id: '', status: 'downloading', project: projectName, attachments: [meta],
-            });
-          } catch (error) { this.log.warn?.('附件下载提示发送失败（继续下载）', error.message); }
+          batch.largeDownload = meta;
+          // 等卡片先显示「正在下载」再开始下，大文件要好几秒，用户得知道它在动。
+          await this.refreshBatch(batch);
         },
       });
       if (!prepared.attachments?.length) throw new Error('消息中没有找到可下载的附件资源键');
-      delivery = await this.store.createInputDelivery({
-        text: '', prompt: prepared.prompt, messageId: message.message_id, origin: 'attachment',
-        project: projectName, attachments: prepared.attachments,
-      });
+      batch.attachments.push(...prepared.attachments.map((item) => ({ ...item, kind: attachmentKind(item) })));
+      if (prepared.prompt) batch.prompts.push(prepared.prompt);
     } catch (error) {
       this.log.warn?.('附件下载失败', error.message);
-      const failed = {
-        id: '', status: 'failed', project: projectName,
-        attachments: progressMeta ? [progressMeta] : parsed.attachments.map((item) => ({
-          name: item.name || `${item.resourceType}-${String(item.key || '').slice(-8)}`,
-          size: item.declaredSize || 0, mime: item.mime || 'application/octet-stream',
-        })),
-        error: error.message || '未知错误',
-      };
-      try {
-        if (cardMessageId) await this.cards.patchAttachmentReceipt(cardMessageId, failed);
-        else await this.cards.sendAttachmentReceipt(failed);
-      } catch (cardError) { this.log.error?.('附件失败回执发送失败', cardError.message); }
-      return failed;
+      const names = parsed.attachments.map((item) => item.name || item.resourceType).filter(Boolean).join('、') || '附件';
+      batch.errors.push(`${names}：${error.message || '未知错误'}`);
+    } finally {
+      batch.inflight -= 1;
+      batch.largeDownload = null;
     }
+    await this.refreshBatch(batch);
+    this.armBatchSeal(batch);
+    return batch.ready;
+  }
 
-    try {
-      const result = await this.attachmentClipboard(delivery.attachments);
-      await this.store.updateInputDelivery(delivery.id, {
-        status: 'clipboard', clipboardVerified: Boolean(result.verified), clipboardInfo: result.clipboardInfo || '',
-        clipboardMethod: result.method || '', clipboardFallback: Boolean(result.fallback),
-        clipboardPrimaryError: result.primaryError || '', error: '',
-      });
-    } catch (error) {
-      await this.store.updateInputDelivery(delivery.id, {
-        status: 'failed', clipboardVerified: false, error: error.message || '剪贴板写入失败',
-      });
+  /** 正在收集的批次；上一批已封就开新的。批次号同步分配，并发到达的消息不会各开一批。 */
+  openBatch(projectName) {
+    if (this.collectingBatch && !this.collectingBatch.sealed) return this.collectingBatch;
+    const batch = {
+      number: this.store.nextBatchNumber?.() ?? ++this.localBatchSeq,
+      project: projectName, inflight: 0, timer: null, sealed: false, sealRequested: false,
+      attachments: [], prompts: [], errors: [], sourceMessageIds: [], largeDownload: null,
+    };
+    batch.done = new Promise((resolve) => { batch.resolveDone = resolve; });
+    batch.ready = this.store.createInputDelivery({
+      text: '', messageId: '', origin: 'attachment', project: projectName, kind: 'attachment',
+    }).then((delivery) => this.store.updateInputDelivery(delivery.id, { status: 'collecting', batchNumber: batch.number })
+      .then((updated) => updated || delivery));
+    this.collectingBatch = batch;
+    return batch;
+  }
+
+  /** 把内存里的批次写回投递记录，再刷新卡片。 */
+  async refreshBatch(batch) {
+    const delivery = await batch.ready;
+    await this.store.updateInputDelivery(delivery.id, {
+      attachments: batch.attachments,
+      prompt: batch.prompts.join('\n\n'),
+      errors: batch.errors,
+      inflight: batch.inflight,
+      largeDownload: batch.largeDownload,
+      sourceMessageId: batch.sourceMessageIds[0] || '',
+      sourceMessageIds: batch.sourceMessageIds,
+    });
+    return this.refreshAttachmentCard(delivery);
+  }
+
+  armBatchSeal(batch) {
+    clearTimeout(batch.timer);
+    if (batch.sealed || batch.inflight > 0) return;
+    if (batch.sealRequested) {
+      this.sealBatch(batch);
+      return;
     }
+    batch.timer = setTimeout(() => this.sealBatch(batch), this.batchIdleMs);
+    batch.timer.unref?.();
+  }
+
+  sealBatch(batch) {
+    if (batch.sealed) return batch.done;
+    if (batch.inflight > 0) {
+      batch.sealRequested = true;
+      return batch.done;
+    }
+    clearTimeout(batch.timer);
+    batch.sealed = true;
+    if (this.collectingBatch === batch) this.collectingBatch = null;
+    batch.ready
+      .then((delivery) => this.pasteDelivery(delivery))
+      .catch((error) => this.log.error?.('附件批次粘贴失败', error.message))
+      .then(batch.resolveDone);
+    return batch.done;
+  }
+
+  /** 「现在就贴」按钮：不等攒批计时，下载完就贴。 */
+  async flushAttachmentBatch(deliveryId = '') {
+    const batch = this.collectingBatch;
+    if (!batch) return null;
+    const delivery = await batch.ready;
+    if (deliveryId && delivery.id !== deliveryId) return null;
+    return this.sealBatch(batch);
+  }
+
+  /** 让电脑端逐个贴进前台窗口；封批与「重新粘贴」都走这里。 */
+  async pasteDelivery(delivery) {
+    const items = (delivery.attachments || []).filter((item) => item.path);
+    if (!items.length) {
+      await this.store.updateInputDelivery(delivery.id, {
+        status: 'failed', pendingSubmit: false,
+        error: delivery.errors?.length ? '这一批附件都没下载成功' : '这一批没有可贴的附件',
+      });
+      await this.refreshAttachmentCard(delivery);
+      return delivery;
+    }
+    await this.store.updateInputDelivery(delivery.id, { status: 'pasting', error: '', submitError: '' });
+    this.refreshAttachmentCard(delivery);
+    let outcome;
     try {
-      if (cardMessageId) {
-        await this.cards.patchAttachmentReceipt(cardMessageId, delivery);
-        await this.store.updateInputDelivery(delivery.id, { cardMessageId });
-      } else {
-        cardMessageId = await this.cards.sendAttachmentReceipt(delivery);
-        await this.store.updateInputDelivery(delivery.id, { cardMessageId });
-      }
-    } catch (error) { this.log.error?.('附件回执发送失败（不改变剪贴板结果）', error.message); }
+      const result = await this.injector.pasteItems(items.map((item) => ({ path: item.path, kind: item.kind || attachmentKind(item) })));
+      outcome = readMacPasteResult(result, items.length);
+    } catch (error) {
+      outcome = { ok: false, unconfirmed: false, pasted: 0, total: items.length, app: '', reason: error.message };
+    }
+    const status = outcome.ok ? 'pasted' : outcome.unconfirmed ? 'unconfirmed' : outcome.pasted > 0 ? 'partial' : 'failed';
+    await this.store.updateInputDelivery(delivery.id, {
+      status, pastedCount: outcome.pasted, pasteApp: outcome.app, error: outcome.ok ? '' : outcome.reason,
+      pendingSubmit: status !== 'failed', pastedAt: status === 'failed' ? 0 : this.now(),
+    });
+    await this.refreshAttachmentCard(delivery);
     return delivery;
+  }
+
+  pendingBatches(now = this.now()) {
+    return Object.values(this.store.state?.inputDeliveries || {})
+      .filter((item) => item?.kind === 'attachment' && item.pendingSubmit && now - (item.pastedAt || 0) < this.submitWindowMs)
+      .sort((a, b) => (b.pastedAt || 0) - (a.pastedAt || 0));
+  }
+
+  findPendingBatch() {
+    return this.pendingBatches()[0] || null;
+  }
+
+  /** 发送：有指令就先打进输入框（接在附件后面），确认打进去了才回车；没打进去不回车，免得只发出图片。 */
+  async submitBatch(delivery, text = '', { postprocess = false } = {}) {
+    const instruction = String(text || '').trim();
+    let reason = '';
+    try {
+      if (instruction) {
+        const typed = await this.injector.injectText(instruction, { postprocess });
+        if (!(typed?.ok && typed.mode === 'type')) {
+          reason = typed?.ok && typed.mode === 'clipboard'
+            ? '指令没打进去：电脑端没识别到输入焦点，文字已放进剪贴板，没有回车'
+            : typed?.unconfirmed ? '指令发出后电脑端没回执，没敢回车' : describeRelayFailure(typed);
+        }
+      }
+      if (!reason) {
+        const pressed = await this.injector.injectKey('enter');
+        if (!pressed?.ok) reason = describeRelayFailure(pressed);
+      }
+    } catch (error) {
+      reason = error.message;
+    }
+    if (reason) {
+      await this.store.updateInputDelivery(delivery.id, { submitError: reason, submitText: instruction });
+      await this.refreshAttachmentCard(delivery);
+      return delivery;
+    }
+    // 之前贴进同一个输入框、还没发的批次，跟着这次回车一起发出去了。
+    const sentAt = this.now();
+    for (const item of new Set([delivery, ...this.pendingBatches()])) {
+      await this.store.updateInputDelivery(item.id, {
+        status: 'sent', pendingSubmit: false, submitError: '', sentAt,
+        submitText: item === delivery ? instruction : '',
+      });
+      await this.refreshAttachmentCard(item);
+    }
+    return delivery;
+  }
+
+  /** 同一张卡的发送 / PATCH 串行执行，后发的状态不会被先发的旧状态盖掉。 */
+  refreshAttachmentCard(delivery) {
+    const previous = this.cardChains.get(delivery.id) || Promise.resolve();
+    const next = previous.then(async () => {
+      try {
+        if (!delivery.cardMessageId) {
+          const messageId = await this.cards.sendAttachmentReceipt(delivery);
+          if (messageId) await this.store.updateInputDelivery(delivery.id, { cardMessageId: messageId });
+        } else {
+          await this.cards.patchAttachmentReceipt(delivery.cardMessageId, delivery);
+        }
+      } catch (error) {
+        this.log.warn?.('附件回执卡发送失败', error.message);
+      }
+    });
+    this.cardChains.set(delivery.id, next);
+    next.then(() => { if (this.cardChains.get(delivery.id) === next) this.cardChains.delete(delivery.id); });
+    return next;
   }
 
   async handleText(text, { message, task, projectName = '' }) {
@@ -315,7 +453,7 @@ export class BridgeController {
       '/task｜任务模式　语音/文字交给 Claude',
       '任务 <文字>　任意模式强制交给 Claude',
       '注入 <文字> 或 /type <文字>　任意模式强制输入电脑',
-      '图片 / 文件 / 视频 / 富文本附件　input 模式进入 Mac 剪贴板；task 模式交给 Claude',
+      '图片 / 文件 / 视频 / 富文本附件　input 模式几秒内攒成一批贴进电脑前台窗口，再回一句话即接上并回车；task 模式交给 Claude',
       '多任务并行时，引用回复对应任务卡即可精准追问',
       '审批卡可直接回复：允许 / 拒绝；决策卡可回复选项或序号',
       '', '🩺 链路自检',
@@ -326,12 +464,11 @@ export class BridgeController {
 
   async handleCardAction(value) {
     if (String(value.ns || '').startsWith('cc.attachment.')) {
+      if (value.ns === 'cc.attachment.flush') return this.flushAttachmentBatch(value.did);
       const delivery = value.did ? this.store.getInputDelivery?.(value.did) : null;
       if (!delivery?.attachments?.length) return this.log.warn?.('附件动作已过期或不存在', value.did);
-      if (value.ns === 'cc.attachment.paste') {
-        await this.attachmentClipboard(delivery.attachments);
-        return this.injector.injectKey('paste');
-      }
+      if (value.ns === 'cc.attachment.paste') return this.pasteDelivery(delivery);
+      if (value.ns === 'cc.attachment.enter') return this.submitBatch(delivery, '');
       if (value.ns === 'cc.attachment.claude') {
         const task = await this.handleText(delivery.prompt || '处理用户发送的附件', {
           message: { message_id: delivery.sourceMessageId }, task: null, projectName: delivery.project,
@@ -347,8 +484,7 @@ export class BridgeController {
       const sourceMessageId = delivery?.sourceMessageId || referencedTask?.triggerMessageId || '';
       if (value.ns === 'cc.inject.paste') {
         if (!delivery) return this.log.warn?.('粘贴动作已过期或不存在', value.did);
-        await this.clipboard(delivery.text);
-        return this.injector.injectKey('paste');
+        return this.injector.pasteText(delivery.text);
       }
       if (value.ns === 'cc.inject.enter') {
         return this.injector.injectKey('enter');
