@@ -774,14 +774,25 @@ function renderProjects(){
 /* =========================================================
    SSE
    ========================================================= */
+function onStreamMsg(data){ var m; try{m=JSON.parse(data);}catch(_){return;}
+  if(m.type==='history'){ (m.events||[]).forEach(function(ev){ trackProject(ev); if(ev.source==='bridge') addToBridge(ev,true); else addToFeed(ev,true); }); }
+  else if(m.type==='event'){ onEvent(m.event); } }
+/* 云端（/config 带 ws）走可休眠 WebSocket：面板开着也不占 Durable Object 时长；本机 server.js 照旧 SSE */
+var wsFails=0;
 function connect(){
   setConn(false,'连接中…');
-  var es=new EventSource(withTok('/events'));
-  es.onopen=function(){ setConn(true,'已连接'); };
-  es.onerror=function(){ setConn(false,'重连中…'); };
-  es.onmessage=function(e){ var m; try{m=JSON.parse(e.data);}catch(_){return;}
-    if(m.type==='history'){ (m.events||[]).forEach(function(ev){ trackProject(ev); if(ev.source==='bridge') addToBridge(ev,true); else addToFeed(ev,true); }); }
-    else if(m.type==='event'){ onEvent(m.event); } };
+  if(!CFG.ws || !('WebSocket' in window)){
+    var es=new EventSource(withTok('/events'));
+    es.onopen=function(){ setConn(true,'已连接'); };
+    es.onerror=function(){ setConn(false,'重连中…'); };
+    es.onmessage=function(e){ onStreamMsg(e.data); };
+    return;
+  }
+  var ws=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.host+withTok('/events')), ping=null;
+  ws.onopen=function(){ wsFails=0; setConn(true,'已连接'); ping=setInterval(function(){ try{ ws.send('ping'); }catch(_){} },30000); };
+  ws.onmessage=function(e){ if(e.data!=='pong') onStreamMsg(e.data); };
+  ws.onclose=function(){ clearInterval(ping); setConn(false,'重连中…'); wsFails++;
+    setTimeout(connect, Math.min(30000, 3000*wsFails)); };
 }
 function setConn(ok,txt){ var d=document.getElementById('connDot'); d.className='dot '+(ok?'on':'off'); document.getElementById('connTxt').textContent=txt; }
 
@@ -886,6 +897,7 @@ fetch(withTok('/config')).then(function(r){return r.json();}).then(function(c){
   if(c.voicePool && c.voicePool.length) CFG.voicePool=c.voicePool;
   if(c.userName){ CFG.userName=c.userName; document.getElementById('userName').textContent=c.userName; }
   if(c.defaultVoice) CFG.defaultVoice=c.defaultVoice;
+  CFG.ws=!!c.ws;
   if(c.vapidPublic){ CFG.vapidPublic=c.vapidPublic; document.getElementById('pushBtn').style.display=''; registerSW(); }
 }).catch(function(){}).finally(function(){ renderVoices(); renderProjects(); connect(); showIosHint(); });
 

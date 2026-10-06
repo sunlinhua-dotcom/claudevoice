@@ -101,7 +101,13 @@ export default {
       let payload = {};
       try { payload = await req.json(); } catch (_) {}
       const ev = await normalizeEvent(payload, env);
-      if (ev) await hub(env).fetch('https://do/broadcast', { method: 'POST', body: JSON.stringify(ev) });
+      if (ev) {
+        // 小智盒子 / 圆屏直接从 Worker 发，不经 DO：10/02 DO 免费时长用光（眼镜网关常挂事件流），
+        // 整条 /hook 跟着 1101，盒子、圆屏、Mac 发声全哑了一夜。DO 挂了这里照样发，Mac 照样拿到事件念。
+        if (!ev.silent && !ev.noNotify) ctx.waitUntil(sendXiaozhi(env, ev));
+        try { await hub(env).fetch('https://do/broadcast', { method: 'POST', body: JSON.stringify(ev) }); }
+        catch (e) { console.log('hub broadcast failed', String(e)); }
+      }
       return jsonResp({ ok: true, event: ev || null }, 200, cors); // 返回事件，供 Mac 端 afplay 发声
     }
 
@@ -109,8 +115,12 @@ export default {
     const cookieTok = (() => { const c = req.headers.get('cookie') || ''; const m = c.match(/(?:^|;\s*)cv_token=([^;]+)/); return m ? decodeURIComponent(m[1]) : ''; })();
     const tokOK = !env.DASH_TOKEN || url.searchParams.get('token') === env.DASH_TOKEN || req.headers.get('x-cv-token') === env.DASH_TOKEN || cookieTok === env.DASH_TOKEN;
 
+    // 服务端订阅（Rokid 眼镜网关等）拿 hook secret 也能读事件流，不用面板口令
+    const hookSecOK = !!env.HOOK_SECRET && req.headers.get('x-cv-secret') === env.HOOK_SECRET;
     if (p === '/events') {
-      if (!tokOK) return jsonResp({ error: 'token required' }, 401, cors);
+      if (!tokOK && !hookSecOK) return jsonResp({ error: 'token required' }, 401, cors);
+      // 优先 WebSocket（可休眠，挂着不计 DO 时长）；SSE 只留给老客户端，连着就一直占着 DO
+      if ((req.headers.get('upgrade') || '').toLowerCase() === 'websocket') return hub(env).fetch(new Request('https://do/ws', req));
       return hub(env).fetch('https://do/sse');
     }
     if (p === '/subscribe' && req.method === 'POST') {
@@ -119,7 +129,7 @@ export default {
       return hub(env).fetch('https://do/subscribe', { method: 'POST', body });
     }
     if (p === '/latest') {
-      if (!tokOK) return jsonResp({ error: 'token required' }, 401, cors);
+      if (!tokOK && !hookSecOK) return jsonResp({ error: 'token required' }, 401, cors);
       return hub(env).fetch('https://do/latest');
     }
     // 待确认读音：读音表里没有、只能靠兜底猜的项目，攒在这里等用户拍板。
@@ -165,6 +175,7 @@ export default {
         userName: env.USER_NAME || 'Dev',
         requiresToken: !!env.DASH_TOKEN,
         vapidPublic: env.VAPID_PUBLIC || '',
+        ws: true,   // 面板据此走 WebSocket；本机 server.js 没这项，面板照旧走 SSE
       }, 200, { ...cors, 'cache-control': 'no-store' });
     }
 
@@ -197,6 +208,24 @@ export default {
   },
 };
 
+const XIAOZHI_KINDS = new Set(['done', 'waiting', 'permission', 'failed']);
+
+// 小智盒子（ESP32 自建服务器排队，盒子待机时自己醒来念）：只念完成 / 等你确认 / 失败。
+// 地址和口令都是 secret：XIAOZHI_ANNOUNCE_URL、XIAOZHI_ANNOUNCE_TOKEN；没配就不发。
+async function sendXiaozhi(env, ev) {
+  const url = env.XIAOZHI_ANNOUNCE_URL, tok = env.XIAOZHI_ANNOUNCE_TOKEN;
+  if (!url || !tok || !ev.speak || !XIAOZHI_KINDS.has(ev.kind)) return;
+  try {
+    const r = await fetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${tok}` },
+      body: JSON.stringify({ text: ev.speak, kind: ev.kind, project: ev.project || '', session: ev.sessionId || '' }),   // 会话号：工牌上按条语音回复（xzreply/）
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!r.ok) console.log('xiaozhi announce', r.status);
+  } catch (e) { console.log('xiaozhi announce failed', String(e)); }
+}
+
 function hub(env) {
   return env.HUB.get(env.HUB.idFromName('global'));
 }
@@ -214,10 +243,13 @@ export class Hub {
       this.recent = (await state.storage.get('recent')) || [];
       this.subs = (await state.storage.get('subs')) || [];
     });
+    // 客户端每 30 秒发 'ping' 保活，由运行时直接回 'pong'，不叫醒休眠中的 DO
+    state.setWebSocketAutoResponse(new WebSocketRequestResponsePair('ping', 'pong'));
   }
 
   async fetch(req) {
     const p = new URL(req.url).pathname;
+    if (p === '/ws') return this.handleWS(req);
     if (p === '/sse') return this.handleSSE();
     if (p === '/broadcast') { const ev = await req.json(); await this.broadcast(ev); return Response.json({ ok: true }); }
     if (p === '/subscribe') { const sub = await req.json(); await this.addSub(sub); return Response.json({ ok: true }); }
@@ -260,6 +292,18 @@ export class Hub {
     return new Response('not found', { status: 404 });
   }
 
+  // 可休眠 WebSocket：连着的面板不占 DO 时长，只有广播和新连接进来时才醒
+  handleWS(req) {
+    if ((req.headers.get('upgrade') || '').toLowerCase() !== 'websocket') return new Response('expected websocket', { status: 426 });
+    const [client, server] = Object.values(new WebSocketPair());
+    this.state.acceptWebSocket(server);
+    server.send(JSON.stringify({ type: 'history', events: this.recent.slice(-20) }));
+    return new Response(null, { status: 101, webSocket: client });
+  }
+  webSocketMessage(ws, msg) {}   // 客户端不发别的；'ping' 已由自动应答处理
+  webSocketClose(ws, code, reason) { try { ws.close(code, reason); } catch (_) {} }
+  webSocketError(ws) { try { ws.close(1011, 'error'); } catch (_) {} }
+
   handleSSE() {
     const { readable, writable } = new TransformStream();
     const w = writable.getWriter();
@@ -288,9 +332,14 @@ export class Hub {
       try { await w.write(this.enc.encode(msg)); }
       catch (_) { this.writers.delete(id); }
     }
+    const wmsg = JSON.stringify({ type: 'event', event: ev });
+    for (const ws of this.state.getWebSockets()) {
+      try { ws.send(wmsg); } catch (_) {}
+    }
     // 推手机：Web Push + Telegram + 飞书（不阻塞失败）；静音事件（子任务）不推手机
     if (!ev.silent) {
       const delivery = { push: () => this.sendPush(ev), telegram: () => this.sendTelegram(ev), lark: () => this.sendLark(ev) };
+      // 小智那一路已经在 Worker 的 /hook 里发了（不依赖 DO），这里不再发，免得念两遍
       await Promise.allSettled(deliveryPlan(ev).map((name) => delivery[name]()));
     }
     if (ev.unknownName && ev.projectKey && ev.projectKey !== 'unknown') {
