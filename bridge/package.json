@@ -1,0 +1,35 @@
+{
+  "name": "cc-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Claude Code 飞书指挥台",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node index.mjs",
+    "test": "node --test test/*.test.mjs",
+    "test:claude": "node test/smoke-claude.mjs",
+    "test:approval": "node test/approval-smoke.mjs",
+    "test:ask-user": "node test/ask-user-e2e.mjs",
+    "test:p0-lark": "node test/send-p0-cards.mjs",
+    "fix:incident-task": "node test/cleanup-incident-task.mjs",
+    "test:lark": "node test/send-lark-test.mjs",
+    "test:m3-lark": "node test/m3-lark-smoke.mjs",
+    "test:ui2-lark": "node test/send-ui2-cards.mjs",
+    "test:input-clipboard": "node test/input-clipboard-e2e.mjs",
+    "test:input-relay": "node test/relay-input-smoke.mjs",
+    "test:text-inject-order": "node test/text-inject-order-e2e.mjs",
+    "test:input-lark": "node test/send-input-card.mjs",
+    "test:attachment-clipboard": "node test/attachment-clipboard-e2e.mjs",
+    "test:attachment-paste": "node test/attachment-paste-smoke.mjs",
+    "test:attachment-lark": "node test/send-attachment-card.mjs",
+    "test:readonly-task": "node test/readonly-task-e2e.mjs",
+    "assets:upload": "node assets/upload-assets.mjs",
+    "env:sync-worker": "node sync-worker-env.mjs"
+  },
+  "dependencies": {
+    "@larksuiteoapi/node-sdk": "^1.71.1"
+  }
+}

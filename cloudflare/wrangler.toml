@@ -1,0 +1,42 @@
+name = "claudevoice"
+main = "src/worker.js"
+compatibility_date = "2026-06-01"
+workers_dev = true
+
+# No account identifiers live in this file. Wrangler deploys to the Cloudflare account you are
+# logged in with (`npx wrangler login`). If you have several accounts, uncomment and fill in:
+# account_id = "<YOUR_CLOUDFLARE_ACCOUNT_ID>"
+#
+# To serve the panel from your own domain instead of *.workers.dev:
+# routes = [{ pattern = "voice.example.com", custom_domain = true }]
+
+# 静态面板（复用项目根目录的 public/）。Worker 先跑，未命中 API 的再回落到静态资源。
+[assets]
+directory = "../public"
+binding = "ASSETS"
+run_worker_first = true
+
+# 实时广播 + 推送订阅 的有状态实例
+[[durable_objects.bindings]]
+name = "HUB"
+class_name = "Hub"
+
+# Workers AI：用来把完成说明总结+转中文成一句可朗读的话（免费额度内）
+[ai]
+binding = "AI"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Hub"]
+
+# 非敏感配置（敏感项用 wrangler secret put；完整清单见 docs/CONFIGURATION.md 第 3 节）
+[vars]
+TTS_ENGINE = "edge"
+TTS_VOICE = "茉莉"
+# 播报称呼个性化（可选，属个人信息，不放进仓库）：
+#   wrangler secret put USER_NAME      # 播报时称呼你的名字（默认 Dev）
+#   wrangler secret put USER_ALIASES   # 备用称呼，逗号分隔，随机轮换
+# 手机面板解锁密码（输对就换成真 token 种 cookie，免去手输令牌）。
+# 不要在此处硬编码密码——请用 Cloudflare secret 设置：
+#   wrangler secret put UNLOCK_PASSWORD
+# 未设置时 /unlock 一律拒绝（worker.js 无内置默认值）。

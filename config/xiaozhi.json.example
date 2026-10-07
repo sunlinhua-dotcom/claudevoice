@@ -1,0 +1,7 @@
+{
+  "_comment": "Optional. Copy to ~/.config/claudevoice/xiaozhi.json (chmod 600) to let the Mac app speak in sync with your own xiaozhi-style voice box server. Without this file box sync stays off and nothing changes.",
+  "bases": ["http://box-relay.local:8000", "https://box.example.com"],
+  "device_id": "aa:bb:cc:dd:ee:ff",
+  "client_id": "any-uuid (optional)",
+  "token": "box server token"
+}

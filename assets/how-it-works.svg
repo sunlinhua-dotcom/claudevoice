@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 440" font-family="-apple-system,'PingFang SC','Microsoft YaHei',Segoe UI,Roboto,sans-serif">
+  <rect x="0" y="0" width="1400" height="440" rx="24" fill="#F7F5F0"/>
+  <text x="700" y="60" text-anchor="middle" font-size="30" font-weight="700" fill="#2B2B2B">ClaudeVoice · 工作流程</text>
+  <text x="700" y="94" text-anchor="middle" font-size="16" fill="#8A8A8A">任何 Claude Code 会话完成或等待输入时，自动播报并推送到手机</text>
+
+  <g>
+    <rect x="60" y="150" width="250" height="150" rx="16" fill="#FFFFFF" stroke="#9CA3AF" stroke-width="2"/>
+    <text x="185" y="200" text-anchor="middle" font-size="19" font-weight="600" fill="#2B2B2B">① 任意会话</text>
+    <text x="185" y="235" text-anchor="middle" font-size="15" fill="#646A73">完成任务</text>
+    <text x="185" y="260" text-anchor="middle" font-size="15" fill="#646A73">或等待输入</text>
+  </g>
+  <g stroke="#BBBFC4" stroke-width="2.5" fill="none"><path d="M320 225 H388" marker-end="url(#a)"/></g>
+
+  <g>
+    <rect x="403" y="150" width="250" height="150" rx="16" fill="#FFFFFF" stroke="#E0876A" stroke-width="2"/>
+    <text x="528" y="200" text-anchor="middle" font-size="19" font-weight="600" fill="#2B2B2B">② Hook 触发</text>
+    <text x="528" y="235" text-anchor="middle" font-size="15" fill="#646A73">Stop / Notification</text>
+    <text x="528" y="260" text-anchor="middle" font-size="15" fill="#646A73">钩子上报事件</text>
+  </g>
+  <g stroke="#BBBFC4" stroke-width="2.5" fill="none"><path d="M653 225 H721" marker-end="url(#a)"/></g>
+
+  <g>
+    <rect x="736" y="150" width="250" height="150" rx="16" fill="#FFFFFF" stroke="#E0876A" stroke-width="2"/>
+    <text x="861" y="200" text-anchor="middle" font-size="19" font-weight="600" fill="#2B2B2B">③ 语音播报</text>
+    <text x="861" y="235" text-anchor="middle" font-size="15" fill="#646A73">Edge / Azure</text>
+    <text x="861" y="260" text-anchor="middle" font-size="15" fill="#646A73">TTS + 颜色区分项目</text>
+  </g>
+  <g stroke="#BBBFC4" stroke-width="2.5" fill="none"><path d="M986 225 H1054" marker-end="url(#a)"/></g>
+
+  <g>
+    <rect x="1069" y="150" width="265" height="150" rx="16" fill="#FCF1EC" stroke="#E0876A" stroke-width="2"/>
+    <text x="1201" y="200" text-anchor="middle" font-size="19" font-weight="600" fill="#B5561F">④ 手机推送</text>
+    <text x="1201" y="235" text-anchor="middle" font-size="15" fill="#8A6A4A">离开电脑也不错过</text>
+    <text x="1201" y="260" text-anchor="middle" font-size="15" fill="#8A6A4A">谁完成了、谁在等</text>
+  </g>
+
+  <text x="700" y="370" text-anchor="middle" font-size="14" fill="#A8A29A">Node 本地服务 + Cloudflare Worker + Swift 菜单栏 App + PWA 面板 · 零依赖核心</text>
+
+  <defs>
+    <marker id="a" markerWidth="10" markerHeight="10" refX="7" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L7,3 L0,6 Z" fill="#BBBFC4"/>
+    </marker>
+  </defs>
+</svg>

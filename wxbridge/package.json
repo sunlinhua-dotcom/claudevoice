@@ -1,0 +1,17 @@
+{
+  "name": "wxbridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "微信 ClawBot -> 项目文件夹 的 brief 与附件回流管道",
+  "main": "index.mjs",
+  "scripts": {
+    "start": "node index.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "qrcode": "^1.5.4"
+  }
+}

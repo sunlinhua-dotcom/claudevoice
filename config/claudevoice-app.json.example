@@ -1,0 +1,7 @@
+{
+  "_comment": "Copy to ~/.claude/claudevoice-app.json (chmod 600). Read by ClaudeVoice.app. If absent, the app derives base/token from ~/.claude/claudevoice.json.",
+  "base": "https://claudevoice.your-subdomain.workers.dev",
+  "token": "same value as HOOK_SECRET (used for /tts)",
+  "panelToken": "same value as DASH_TOKEN (used for the panel / pairing page)",
+  "relay": "wss://claudevoice.your-subdomain.workers.dev/ws"
+}

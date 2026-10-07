@@ -1,0 +1,22 @@
+name = "claudevoice-local-test"
+main = "src/worker.js"
+compatibility_date = "2026-06-01"
+
+[assets]
+directory = "../public"
+binding = "ASSETS"
+run_worker_first = true
+
+[[durable_objects.bindings]]
+name = "HUB"
+class_name = "Hub"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Hub"]
+
+[vars]
+TTS_ENGINE = "edge"
+TTS_VOICE = "茉莉"
+USER_NAME = "Dev"
+USER_ALIASES = ""

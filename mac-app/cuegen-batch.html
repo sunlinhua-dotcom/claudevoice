@@ -1,0 +1,119 @@
+<!doctype html><meta charset="utf-8"><title>cuegen batch</title>
+<body style="font:14px/1.6 -apple-system,sans-serif;background:#111;color:#ddd;padding:20px">
+<h3 id="s">准备中…</h3><pre id="log" style="max-height:70vh;overflow:auto;color:#8a8"></pre>
+<script>
+// 这是 cuegen.html 的「按项目播种」版本。
+// 合成结构一个音符都没改——还是那段管风琴涌升 + 上行铃铛琶音 + 滴答 + 顶点泛音 + 卷积混响，
+// 所以出来的东西跟现在用的那条是一家人。变的只是参数：调高、和弦voicing、琶音音型、
+// 铃铛音色、滴答的密度和音高、混响长度、滤波扫频终点、泛音起落。
+// 每个项目按名字 hash 出一组稳定的参数，换句话说：同一个项目永远是同一条音效。
+
+function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;};}
+function hash32(str){let h=2166136261>>>0;for(let i=0;i<str.length;i++){h^=str.charCodeAt(i);h=Math.imul(h,16777619);}return h>>>0;}
+
+function bufToWav(buf){
+  const ch=buf.numberOfChannels, sr=buf.sampleRate, n=buf.length, bps=2, ba=ch*bps;
+  const dv=new DataView(new ArrayBuffer(44+n*ba)); let p=0;
+  const s=t=>{for(let i=0;i<t.length;i++)dv.setUint8(p++,t.charCodeAt(i));};
+  const u32=v=>{dv.setUint32(p,v,true);p+=4;}, u16=v=>{dv.setUint16(p,v,true);p+=2;};
+  s('RIFF');u32(36+n*ba);s('WAVE');s('fmt ');u32(16);u16(1);u16(ch);u32(sr);u32(sr*ba);u16(ba);u16(16);s('data');u32(n*ba);
+  const cd=[];for(let c=0;c<ch;c++)cd.push(buf.getChannelData(c));
+  for(let i=0;i<n;i++)for(let c=0;c<ch;c++){let v=Math.max(-1,Math.min(1,cd[c][i]));dv.setInt16(p,v<0?v*32768:v*32767,true);p+=2;}
+  const u8=new Uint8Array(dv.buffer); let bin='';
+  for(let i=0;i<u8.length;i+=0x8000) bin+=String.fromCharCode.apply(null,u8.subarray(i,i+0x8000)); // 分块，别一个字符一个字符拼
+  return btoa(bin);
+}
+
+// 和弦 voicing 与琶音音型：每一组都还是稳的三度/五度堆叠，换的是颜色，不会跑到怪调上去。
+const VOICE={
+  done:[{A:[0,4,7,12],B:[0,5,9,17]},{A:[0,4,7,11],B:[2,5,9,14]},{A:[0,5,7,12],B:[0,4,9,16]},{A:[0,4,9,12],B:[-3,4,7,14]}],
+  alert:[{A:[0,3,7,10],B:[2,5,9,12]},{A:[0,3,7,12],B:[0,5,8,15]},{A:[0,2,7,10],B:[3,5,10,14]},{A:[0,3,8,12],B:[1,5,8,13]}],
+};
+const ARPS=[[12,16,19,24,28,31],[12,15,19,22,27,31],[12,17,19,24,26,31],[12,16,21,24,28,33],[7,12,16,19,24,28]];
+const SHIFTS=[-5,-4,-2,0,2,3,5,7];   // 移调，最容易听出"这是另一个项目"
+
+function paramsFor(key,kind){
+  const r=mulberry32(hash32(key+'|'+kind)), pick=a=>a[Math.floor(r()*a.length)], rng=(a,b)=>a+r()*(b-a);
+  const needs=(kind!=='done');
+  return {
+    needs,
+    shift: pick(SHIFTS),
+    voice: pick(VOICE[needs?'alert':'done']),
+    arp: pick(ARPS),
+    arpStep: needs?rng(.22,.30):rng(.26,.34),
+    bellType: r()<.55?'triangle':'sine',
+    tickHz: rng(1900,2900),
+    tickCount: needs?Math.round(rng(7,11)):Math.round(rng(3,6)),
+    tickGap: needs?rng(.13,.19):rng(.18,.30),
+    revLen: rng(2.0,3.2),
+    filtTo: needs?rng(2300,3200):rng(1600,2400),
+    pingFrom: needs?rng(2700,3300):rng(2200,2800),
+    pingTo: needs?rng(4000,4800):rng(2900,3400),
+    detune: rng(1.003,1.007),
+    dur: needs?rng(2.8,3.6):rng(3.2,4.2),
+  };
+}
+
+async function renderCue(key,kind){
+  const P=paramsFor(key,kind), sr=44100, needs=P.needs, dur=P.dur, total=dur+1.8;
+  const oc=new OfflineAudioContext(2, Math.floor(sr*total), sr);
+  const master=oc.createGain(); master.gain.value=0.9;
+  const comp=oc.createDynamicsCompressor(); comp.threshold.value=-18; comp.ratio.value=3; master.connect(comp); comp.connect(oc.destination);
+  const rev=oc.createConvolver(); const rl=Math.floor(sr*P.revLen), ir=oc.createBuffer(2,rl,sr);
+  for(let c=0;c<2;c++){const d=ir.getChannelData(c);for(let i=0;i<rl;i++)d[i]=(Math.random()*2-1)*Math.pow(1-i/rl,2.6);}
+  rev.buffer=ir; rev.connect(master);
+  const dry=oc.createGain(); dry.gain.value=1; dry.connect(master);
+  const wet=oc.createGain(); wet.gain.value=0.9; wet.connect(rev);
+  const t=0;
+  const baseRoot=(needs?146.83:130.81)*Math.pow(2,P.shift/12);
+  const sc={root:baseRoot,A:P.voice.A,B:P.voice.B,arp:P.arp};
+  const root=sc.root, semi=n=>root*Math.pow(2,n/12), pan=p=>{const x=oc.createStereoPanner();x.pan.value=p;return x;};
+  const sub=(needs?43:41)*Math.pow(2,P.shift/12);
+  (()=>{const o=oc.createOscillator(),o2=oc.createOscillator(),g=oc.createGain();o.type='sine';o2.type='sine';
+    o.frequency.setValueAtTime(sub,t);o2.frequency.setValueAtTime(sub*1.5,t);if(needs)o.frequency.linearRampToValueAtTime(sub*1.26,t+dur*.7);
+    g.gain.setValueAtTime(0,t);g.gain.linearRampToValueAtTime(.6,t+.6);g.gain.setValueAtTime(.6,t+dur*.6);g.gain.exponentialRampToValueAtTime(.0001,t+dur);
+    o.connect(g);o2.connect(g);g.connect(dry);o.start(t);o2.start(t);o.stop(t+dur+.2);o2.stop(t+dur+.2);})();
+  function chord(off,len,offs){const ct=t+off;offs.forEach((nn,idx)=>{const f=semi(nn),o=oc.createOscillator(),o2=oc.createOscillator(),g=oc.createGain(),lp=oc.createBiquadFilter(),pn=pan((idx/(offs.length-1)-.5)*1.2);
+    o.type='sine';o2.type='triangle';o.frequency.setValueAtTime(f,ct);o2.frequency.setValueAtTime(f*P.detune,ct);
+    if(needs){o.frequency.linearRampToValueAtTime(f*1.04,ct+len);o2.frequency.linearRampToValueAtTime(f*1.044,ct+len);}
+    lp.type='lowpass';lp.frequency.setValueAtTime(420,ct);lp.frequency.linearRampToValueAtTime(P.filtTo,ct+len*.7);
+    g.gain.setValueAtTime(0,ct);g.gain.linearRampToValueAtTime(.10,ct+(needs?.6:.45));g.gain.exponentialRampToValueAtTime(.0001,ct+len+.3);
+    o.connect(lp);o2.connect(lp);lp.connect(g);g.connect(pn);pn.connect(dry);pn.connect(wet);o.start(ct);o2.start(ct);o.stop(ct+len+.4);o2.stop(ct+len+.4);});}
+  chord(0,dur*.58,sc.A); chord(dur*.45,dur*.55,sc.B);
+  function bell(f,ct,amp,pp){const o=oc.createOscillator(),g=oc.createGain(),pn=pan(pp);o.type=P.bellType;o.frequency.setValueAtTime(f,ct);
+    g.gain.setValueAtTime(0,ct);g.gain.linearRampToValueAtTime(amp,ct+.012);g.gain.exponentialRampToValueAtTime(.0001,ct+1.2);
+    o.connect(g);g.connect(pn);pn.connect(dry);pn.connect(wet);o.start(ct);o.stop(ct+1.3);}
+  sc.arp.forEach((nn,i)=>{const ct=t+.35+i*P.arpStep;bell(semi(nn),ct,.13,(i%2)?.4:-.4);bell(semi(nn+12),ct+.04,.06,(i%2)?-.3:.3);});
+  {const top=sc.arp[sc.arp.length-1]+5;[0,2,4,6].forEach(j=>bell(semi(top-j*3),t+dur*.72+j*.13,.08,j%2?.45:-.45));}
+  for(let k=0;k<P.tickCount;k++){const ct=t+.15+k*P.tickGap,o=oc.createOscillator(),g=oc.createGain(),bp=oc.createBiquadFilter(),pn=pan(k%2?.2:-.2);
+    bp.type='bandpass';bp.frequency.value=P.tickHz;bp.Q.value=7;o.type='square';o.frequency.value=P.tickHz;
+    const amp=.045*(1+k/P.tickCount);g.gain.setValueAtTime(0,ct);g.gain.linearRampToValueAtTime(amp,ct+.004);g.gain.exponentialRampToValueAtTime(.0001,ct+.07);
+    o.connect(bp);bp.connect(g);g.connect(pn);pn.connect(dry);o.start(ct);o.stop(ct+.08);}
+  (()=>{const pt=t+(needs?dur*.72:dur*.5),o=oc.createOscillator(),g=oc.createGain();o.type='sine';o.frequency.setValueAtTime(P.pingFrom,pt);o.frequency.exponentialRampToValueAtTime(P.pingTo,pt+.5);
+    g.gain.setValueAtTime(0,pt);g.gain.linearRampToValueAtTime(.10,pt+.05);g.gain.exponentialRampToValueAtTime(.0001,pt+.8);o.connect(g);g.connect(dry);g.connect(wet);o.start(pt);o.stop(pt+.85);})();
+  if(needs){const len=Math.floor(sr*dur),nb=oc.createBuffer(1,len,sr),d=nb.getChannelData(0);for(let i=0;i<len;i++)d[i]=(Math.random()*2-1)*.5;
+    const src=oc.createBufferSource();src.buffer=nb;const bp=oc.createBiquadFilter();bp.type='bandpass';bp.Q.value=3;bp.frequency.setValueAtTime(300,t);bp.frequency.exponentialRampToValueAtTime(3500,t+dur*.9);
+    const g=oc.createGain();g.gain.setValueAtTime(0,t);g.gain.linearRampToValueAtTime(.05,t+dur*.7);g.gain.exponentialRampToValueAtTime(.0001,t+dur);
+    src.connect(bp);bp.connect(g);g.connect(dry);g.connect(wet);src.start(t);src.stop(t+dur+.1);}
+  return {wav:bufToWav(await oc.startRendering()), dur:Math.min(5,Math.max(2,dur+1.0))};
+}
+
+(async()=>{
+  const S=document.getElementById('s'), L=document.getElementById('log');
+  const projects=await (await fetch('/_projects')).json();
+  const keys=Object.keys(projects); let n=0, fail=0;
+  for(const key of keys){
+    for(const kind of ['done','alert']){
+      try{
+        const {wav,dur}=await renderCue(key,kind);
+        const r=await fetch('/_save',{method:'POST',headers:{'Content-Type':'application/json'},
+                            body:JSON.stringify({name:projects[key].slug+'-'+kind, wav, dur})});
+        if(!r.ok) throw new Error('HTTP '+r.status);
+        n++;
+      }catch(e){ fail++; L.textContent+='FAIL '+key+' '+kind+' '+e.message+'\n'; }
+    }
+    S.textContent='已生成 '+n+' / '+(keys.length*2)+(fail?('（失败 '+fail+'）'):'');
+  }
+  S.textContent='DONE 全部完成：'+n+' 条'+(fail?('，失败 '+fail):'');
+})();
+</script></body>

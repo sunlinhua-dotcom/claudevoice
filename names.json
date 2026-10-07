@@ -1,0 +1,7 @@
+{
+  "_readme": "Project pronunciation table. key = project directory name (case-insensitive match). name = what the panel/banner shows; say = what TTS actually speaks (homophone characters are fine). Edit, then redeploy the Worker (cd cloudflare && npx wrangler deploy) or hot-edit a deployed Worker with tools/cvname. Entries here are examples - replace them with your own projects.",
+
+  "CLAUDEVOICE": { "name": "Claude Voice", "say": "Claude Voice" },
+  "my-web-app":  { "name": "My Web App",   "say": "My Web App" },
+  "api-service": { "name": "API Service",  "say": "A P I Service" }
+}

@@ -1,0 +1,64 @@
+name: Release macOS App
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "要创建或更新的 Release tag（例如 v1.0.0）"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-14
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Validate release tag
+        run: |
+          case "$RELEASE_TAG" in
+            v*) ;;
+            *) echo "Release tag 必须以 v 开头：$RELEASE_TAG" >&2; exit 1 ;;
+          esac
+
+      - name: Build arm64 app
+        env:
+          CV_ARCH: arm64
+          OUT_DIR: ${{ runner.temp }}/claudevoice-arm64
+        run: bash mac-app/build.sh --no-install
+
+      - name: Build x86_64 app
+        env:
+          CV_ARCH: x86_64
+          OUT_DIR: ${{ runner.temp }}/claudevoice-x86_64
+        run: bash mac-app/build.sh --no-install
+
+      - name: Assemble universal app
+        run: |
+          mkdir -p dist
+          ditto "${{ runner.temp }}/claudevoice-arm64/ClaudeVoice.app" "dist/ClaudeVoice.app"
+          lipo -create \
+            "${{ runner.temp }}/claudevoice-arm64/ClaudeVoice.app/Contents/MacOS/ClaudeVoice" \
+            "${{ runner.temp }}/claudevoice-x86_64/ClaudeVoice.app/Contents/MacOS/ClaudeVoice" \
+            -output "dist/ClaudeVoice.app/Contents/MacOS/ClaudeVoice"
+          codesign --force --deep --sign - --identifier com.claudevoice.app "dist/ClaudeVoice.app"
+          lipo -info "dist/ClaudeVoice.app/Contents/MacOS/ClaudeVoice"
+          codesign --verify --deep --strict "dist/ClaudeVoice.app"
+          ditto -c -k --keepParent "dist/ClaudeVoice.app" "dist/ClaudeVoice.app.zip"
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          files: dist/ClaudeVoice.app.zip
+          fail_on_unmatched_files: true
+          generate_release_notes: true

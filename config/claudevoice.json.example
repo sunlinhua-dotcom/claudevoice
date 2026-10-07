@@ -1,0 +1,6 @@
+{
+  "_comment": "Copy to ~/.claude/claudevoice.json (chmod 600). `node setup.js` / `cloudflare/deploy.sh` write this for you. Optional extra key \"webUrl\": \"https://cc.example.com\" adds CloudCLI deep links to notifications (docs/CONFIGURATION.md section 9); omit it for no links. Remove this _comment key if you like.",
+  "url": "https://claudevoice.your-subdomain.workers.dev/hook",
+  "secret": "same value as HOOK_SECRET",
+  "projectRoots": ["/Users/you/Projects", "/Users/you/Desktop"]
+}

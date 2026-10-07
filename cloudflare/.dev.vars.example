@@ -1,0 +1,5 @@
+# Local `wrangler dev` secrets. Copy to cloudflare/.dev.vars (gitignored). Same names as production secrets.
+HOOK_SECRET=dev-secret
+DASH_TOKEN=dev-token
+UNLOCK_PASSWORD=dev-password
+USER_NAME=Dev
